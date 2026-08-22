@@ -69,6 +69,11 @@ class StatusEventStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_events_task_time
                     ON task_events(task_id, occurred_at_ms DESC);
+                CREATE TABLE IF NOT EXISTS task_layout (
+                    task_id TEXT PRIMARY KEY,
+                    display_order INTEGER NOT NULL,
+                    hidden INTEGER NOT NULL DEFAULT 0
+                );
                 """
             )
             columns = {row[1] for row in database.execute("PRAGMA table_info(task_events)")}
@@ -96,6 +101,11 @@ class StatusEventStore:
         occurred_at_ms = int(event.get("occurred_at_ms") or time.time_ns() // 1_000_000)
         with self._connect() as database:
             database.execute(
+                """INSERT OR IGNORE INTO task_layout(task_id, display_order, hidden)
+                   VALUES (?, COALESCE((SELECT MAX(display_order) + 1 FROM task_layout), 0), 0)""",
+                (task_id,),
+            )
+            database.execute(
                 """
                 INSERT INTO task_events(task_id, title, state, progress, source, summary, input_tokens, output_tokens, occurred_at_ms)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -103,7 +113,7 @@ class StatusEventStore:
                 (task_id, title, state, progress, source, summary, input_tokens, output_tokens, occurred_at_ms),
             )
 
-    def latest_records(self, limit: int = 63) -> list[dict[str, Any]]:
+    def latest_records(self, limit: int = 500) -> list[dict[str, Any]]:
         """返回每个任务的最新记录，供状态页展示和人工修正。"""
         with self._connect() as database:
             rows = database.execute(
@@ -112,12 +122,30 @@ class StatusEventStore:
                     SELECT *, ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY occurred_at_ms DESC, id DESC) position
                     FROM task_events
                 )
-                SELECT task_id,title,state,progress,source,summary,occurred_at_ms
-                FROM ranked WHERE position=1
-                ORDER BY occurred_at_ms DESC LIMIT ?
-                """, (max(1, min(63, limit)),)
+                SELECT ranked.task_id,title,state,progress,source,summary,occurred_at_ms
+                FROM ranked
+                LEFT JOIN task_layout layout ON layout.task_id=ranked.task_id
+                WHERE position=1 AND COALESCE(layout.hidden,0)=0
+                ORDER BY COALESCE(layout.display_order, 2147483647), occurred_at_ms DESC LIMIT ?
+                """, (max(1, min(1000, limit)),)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def reorder_tasks(self, task_ids: list[str]) -> None:
+        with self._connect() as database:
+            for order, task_id in enumerate(task_ids):
+                database.execute(
+                    """INSERT INTO task_layout(task_id,display_order,hidden) VALUES(?,?,0)
+                       ON CONFLICT(task_id) DO UPDATE SET display_order=excluded.display_order""",
+                    (task_id, order),
+                )
+
+    def hide_tasks(self, task_ids: list[str]) -> None:
+        with self._connect() as database:
+            database.executemany(
+                "UPDATE task_layout SET hidden=1 WHERE task_id=?",
+                [(task_id,) for task_id in task_ids],
+            )
 
     def usage_totals(self) -> tuple[int, int]:
         now_ms = time.time_ns() // 1_000_000
@@ -142,11 +170,11 @@ class StatusEventStore:
                     ) AS position
                     FROM task_events
                 )
-                SELECT task_id, title, state, progress, occurred_at_ms
-                FROM ranked WHERE position = 1
-                ORDER BY CASE state
-                    WHEN 'running' THEN 0 WHEN 'waiting' THEN 1 ELSE 2 END,
-                    occurred_at_ms DESC
+                SELECT ranked.task_id, title, state, progress, occurred_at_ms
+                FROM ranked
+                LEFT JOIN task_layout layout ON layout.task_id=ranked.task_id
+                WHERE position = 1 AND COALESCE(layout.hidden,0)=0
+                ORDER BY COALESCE(layout.display_order,2147483647), occurred_at_ms DESC
                 LIMIT ?
                 """,
                 (max(1, min(63, task_limit)),),

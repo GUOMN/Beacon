@@ -42,6 +42,7 @@ class WindowsDashboardApp:
         self._plan_balance = tk.StringVar(value="暂不可获取")
         self._status_tree: ttk.Treeview | None = None
         self._status_task_ids: dict[str, str] = {}
+        self._drag_task_item: str | None = None
         self._style_colors: dict[TaskState, tuple[int, int, int]] = {}
         self._style_effects: dict[TaskState, tk.StringVar] = {}
         self._style_frequencies: dict[TaskState, tk.IntVar] = {}
@@ -219,12 +220,18 @@ class WindowsDashboardApp:
 
         ttk.Label(status_tab, text="任务与灯位", font=("Microsoft YaHei UI", 12, "bold")).pack(anchor=tk.W)
         ttk.Label(status_tab, text="双击任务可修改状态、进度和摘要；修改会写入本应用 SQLite。", foreground="#777777").pack(anchor=tk.W, pady=(3, 8))
-        self._status_tree = ttk.Treeview(status_tab, columns=("led", "task", "state", "progress", "summary", "source"), show="headings")
+        task_actions = ttk.Frame(status_tab)
+        task_actions.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(task_actions, text="清理选中任务", command=self._hide_selected_tasks, style="Danger.TButton").pack(side=tk.RIGHT)
+        ttk.Label(task_actions, text="系统灯固定为 0；拖动任务行可调整灯位。", foreground="#777777").pack(side=tk.LEFT)
+        self._status_tree = ttk.Treeview(status_tab, columns=("led", "task", "state", "progress", "summary", "source"), show="headings", selectmode="extended")
         for key, title, width in (("led", "灯位", 65), ("task", "任务", 210), ("state", "状态", 90), ("progress", "进度", 70), ("summary", "摘要", 330), ("source", "来源", 90)):
             self._status_tree.heading(key, text=title)
             self._status_tree.column(key, width=width, anchor=tk.W)
         self._status_tree.pack(fill=tk.BOTH, expand=True)
         self._status_tree.bind("<Double-1>", self._edit_selected_status_task)
+        self._status_tree.bind("<ButtonPress-1>", self._begin_task_drag, add="+")
+        self._status_tree.bind("<ButtonRelease-1>", self._finish_task_drag, add="+")
 
         usage = ttk.LabelFrame(settings_tab, text="第一颗灯 · 系统用量", padding=12)
         usage.pack(fill=tk.X)
@@ -722,17 +729,50 @@ class WindowsDashboardApp:
         tree = self._status_tree
         if tree is None or not tree.winfo_exists():
             return
-        records = self._event_store.latest_records(max(1, self._total_led_count.get() - 1))
+        records = self._event_store.latest_records(500)
         tree.delete(*tree.get_children())
         self._status_task_ids.clear()
         for index, record in enumerate(records):
             iid = f"task_{index}"
             self._status_task_ids[iid] = str(record["task_id"])
             state = TaskState[record["state"].upper()].chinese_name
-            tree.insert("", tk.END, iid=iid, values=(index + 2, record["title"], state, f"{record['progress']}%", record["summary"], record["source"]))
+            task_capacity = max(1, self._total_led_count.get() - 1)
+            led_position: object = index + 1 if index < task_capacity else "未分配"
+            tree.insert("", tk.END, iid=iid, values=(led_position, record["title"], state, f"{record['progress']}%", record["summary"], record["source"]))
         five_hours, seven_days = self._event_store.usage_totals()
         self._five_hour_tokens.set(f"{five_hours:,}")
         self._seven_day_tokens.set(f"{seven_days:,}")
+
+    def _begin_task_drag(self, event: tk.Event) -> None:
+        if self._status_tree is not None:
+            self._drag_task_item = self._status_tree.identify_row(event.y) or None
+
+    def _finish_task_drag(self, event: tk.Event) -> None:
+        tree = self._status_tree
+        source = self._drag_task_item
+        self._drag_task_item = None
+        if tree is None or not source:
+            return
+        target = tree.identify_row(event.y)
+        if not target or target == source:
+            return
+        children = list(tree.get_children())
+        tree.move(source, "", children.index(target))
+        ordered_ids = [self._status_task_ids[item] for item in tree.get_children() if item in self._status_task_ids]
+        self._event_store.reorder_tasks(ordered_ids)
+        self._refresh_status_page()
+        self._post_status("任务灯位顺序已保存")
+
+    def _hide_selected_tasks(self) -> None:
+        tree = self._status_tree
+        if tree is None:
+            return
+        task_ids = [self._status_task_ids[item] for item in tree.selection() if item in self._status_task_ids]
+        if not task_ids:
+            return
+        self._event_store.hide_tasks(task_ids)
+        self._refresh_status_page()
+        self._post_status(f"已从当前视图清理 {len(task_ids)} 个任务")
 
     def _edit_selected_status_task(self, _event: object = None) -> None:
         tree = self._status_tree

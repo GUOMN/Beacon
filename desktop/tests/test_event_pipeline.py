@@ -47,6 +47,16 @@ class EventPipelineTests(unittest.TestCase):
             self.assertIn("existing-notifier.exe", restored)
             self.assertIn("[features]", restored)
 
+    def test_task_order_and_hidden_state_drive_lamp_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            store = StatusEventStore(Path(folder) / "events.sqlite")
+            for task_id in ("one", "two", "three"):
+                store.record({"task_id": task_id, "title": task_id, "state": "running"})
+            store.reorder_tasks(["three", "one", "two"])
+            self.assertEqual([item["task_id"] for item in store.latest_records()], ["three", "one", "two"])
+            store.hide_tasks(["one"])
+            self.assertEqual([item.title for item in store.snapshot(2).tasks], ["three", "two"])
+
 
 if __name__ == "__main__":
     unittest.main()
