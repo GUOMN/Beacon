@@ -43,6 +43,7 @@ class WindowsDashboardApp:
         self._status_tree: ttk.Treeview | None = None
         self._status_task_ids: dict[str, str] = {}
         self._status_records: dict[str, dict[str, object]] = {}
+        self._lamp_color_images: dict[tuple[int, int, int], tk.PhotoImage] = {}
         self._drag_task_item: str | None = None
         self._style_colors: dict[TaskState, tuple[int, int, int]] = {}
         self._style_effects: dict[TaskState, tk.StringVar] = {}
@@ -220,14 +221,15 @@ class WindowsDashboardApp:
             metrics.columnconfigure(column, weight=1)
 
         ttk.Label(status_tab, text="任务与灯位", font=("Microsoft YaHei UI", 12, "bold")).pack(anchor=tk.W)
-        ttk.Label(status_tab, text="双击任务可修改状态、进度和摘要；修改会写入本应用 SQLite。", foreground="#777777").pack(anchor=tk.W, pady=(3, 8))
         task_actions = ttk.Frame(status_tab)
-        task_actions.pack(fill=tk.X, pady=(0, 8))
+        task_actions.pack(fill=tk.X, pady=(4, 8))
         ttk.Button(task_actions, text="删除选中任务", command=self._delete_selected_tasks, style="Danger.TButton").pack(side=tk.RIGHT)
         ttk.Button(task_actions, text="删除已完成任务", command=self._delete_completed_tasks, style="Danger.TButton").pack(side=tk.RIGHT, padx=(0, 8))
-        ttk.Label(task_actions, text="系统灯固定为 0；拖动任务行可调整灯位。", foreground="#777777").pack(side=tk.LEFT)
-        self._status_tree = ttk.Treeview(status_tab, columns=("led", "effect", "task", "state", "summary", "source"), show="headings", selectmode="extended")
-        for key, title, width in (("led", "灯位", 65), ("effect", "当前灯效", 155), ("task", "任务", 210), ("state", "任务状态", 90), ("summary", "摘要", 320), ("source", "来源", 80)):
+        ttk.Label(task_actions, text="第一个灯是系统状态灯，从第二个灯开始计数，灯位为 1；双击可编辑，拖动可调整灯位。", foreground="#777777").pack(side=tk.LEFT)
+        self._status_tree = ttk.Treeview(status_tab, columns=("effect", "task", "state", "summary", "source"), show="tree headings", selectmode="extended")
+        self._status_tree.heading("#0", text="灯位")
+        self._status_tree.column("#0", width=90, anchor=tk.W)
+        for key, title, width in (("effect", "当前灯效", 115), ("task", "任务", 210), ("state", "任务状态", 90), ("summary", "摘要", 340), ("source", "来源", 80)):
             self._status_tree.heading(key, text=title)
             self._status_tree.column(key, width=width, anchor=tk.W)
         self._status_tree.pack(fill=tk.BOTH, expand=True)
@@ -236,6 +238,14 @@ class WindowsDashboardApp:
         self._status_tree.bind("<B1-Motion>", self._move_task_drag, add="+")
         self._status_tree.bind("<ButtonRelease-1>", self._finish_task_drag, add="+")
 
+        settings_header = ttk.Frame(settings_tab)
+        settings_header.pack(fill=tk.X, pady=(0, 12))
+        header_text = ttk.Frame(settings_header)
+        header_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(header_text, text="灯板设置", font=("Microsoft YaHei UI", 14, "bold")).pack(anchor=tk.W)
+        ttk.Label(header_text, text="统一配置灯珠数量、系统灯以及所有任务状态的颜色和动画。", foreground="#777777").pack(anchor=tk.W, pady=(3, 0))
+        ttk.Button(settings_header, text="保存并生效", command=self._send, style="Primary.TButton").pack(side=tk.RIGHT)
+
         usage = ttk.LabelFrame(settings_tab, text="第一颗灯 · 系统用量", padding=12)
         usage.pack(fill=tk.X)
         self._add_scale(usage, "整体亮度", self._master_brightness, 0)
@@ -243,14 +253,6 @@ class WindowsDashboardApp:
             usage,
             text="颜色由绿到红表示余量；闪烁越快表示五小时或当天用量越高",
         ).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
-        ttk.Button(
-            usage,
-            text="发送状态",
-            command=self._send,
-            style="Primary.TButton",
-        ).grid(
-            row=0, rowspan=2, column=3, sticky=tk.NSEW, padx=(16, 0)
-        )
         usage.columnconfigure(1, weight=1)
 
         led_summary = ttk.LabelFrame(settings_tab, text="灯带", padding=12)
@@ -425,7 +427,7 @@ class WindowsDashboardApp:
         ttk.Label(body, text="官方 Hook 数据源", font=("Microsoft YaHei UI", 15, "bold")).pack(anchor=tk.W)
         ttk.Label(
             body,
-            text="事件写入本应用 SQLite，再自动映射到灯板。不会保存提示词正文；上报失败不影响原任务。",
+            text="任务事件会自动映射到灯板。不会保存提示词正文；状态同步失败不影响原任务。",
             foreground="#666666",
             wraplength=690,
         ).pack(anchor=tk.W, pady=(6, 16))
@@ -744,14 +746,34 @@ class WindowsDashboardApp:
             state_enum = TaskState[record["state"].upper()]
             color = self._style_colors.get(state_enum, (0, 0, 0))
             effect = self._style_effects[state_enum].get() if state_enum in self._style_effects else "熄灭"
-            lamp_effect = f"{self._hex_color(color)} · {effect}"
+            lamp_effect = effect
             task_capacity = max(1, self._total_led_count.get() - 1)
             led_position: object = index + 1 if index < task_capacity else "未分配"
-            tree.insert("", tk.END, iid=iid, values=(led_position, lamp_effect, record["title"], state, record["summary"], record["source"]))
+            image = self._lamp_color_images.get(color)
+            if image is None:
+                image = tk.PhotoImage(width=14, height=14)
+                image.put(self._hex_color(color), to=(0, 0, 14, 14))
+                self._lamp_color_images[color] = image
+            tree.insert("", tk.END, iid=iid, text=str(led_position), image=image, values=(lamp_effect, record["title"], state, record["summary"], record["source"]))
 
-    def _begin_task_drag(self, event: tk.Event) -> None:
-        if self._status_tree is not None:
-            self._drag_task_item = self._status_tree.identify_row(event.y) or None
+    def _begin_task_drag(self, event: tk.Event) -> str | None:
+        tree = self._status_tree
+        if tree is None:
+            return None
+        row = tree.identify_row(event.y)
+        self._drag_task_item = row or None
+        if not row:
+            return None
+        # 自行处理选择，避免拖拽绑定抢占 Treeview 的默认选中状态。
+        if event.state & 0x0004:  # Ctrl：增删多选项
+            if row in tree.selection():
+                tree.selection_remove(row)
+            else:
+                tree.selection_add(row)
+        elif row not in tree.selection():
+            tree.selection_set(row)
+        tree.focus(row)
+        return "break"
 
     def _move_task_drag(self, event: tk.Event) -> None:
         tree = self._status_tree
@@ -781,11 +803,11 @@ class WindowsDashboardApp:
         task_ids = [self._status_task_ids[item] for item in tree.selection() if item in self._status_task_ids]
         if not task_ids:
             return
-        if not messagebox.askyesno("永久删除任务", f"将从 SQLite 永久删除选中的 {len(task_ids)} 个任务及全部历史事件，无法恢复。是否继续？", parent=self.root):
+        if not messagebox.askyesno("永久删除任务", f"将永久删除选中的 {len(task_ids)} 个任务及全部历史记录，无法恢复。是否继续？", parent=self.root):
             return
         self._event_store.delete_tasks(task_ids)
         self._refresh_status_page()
-        self._post_status(f"已从 SQLite 永久删除 {len(task_ids)} 个任务")
+        self._post_status(f"已永久删除 {len(task_ids)} 个任务")
 
     def _delete_completed_tasks(self) -> None:
         records = self._event_store.latest_records(1000)
@@ -793,7 +815,7 @@ class WindowsDashboardApp:
         if not task_ids:
             self._post_status("当前没有已完成任务可删除")
             return
-        if not messagebox.askyesno("删除已完成任务", f"将从 SQLite 永久删除 {len(task_ids)} 个已完成任务及全部历史事件，无法恢复。是否继续？", parent=self.root):
+        if not messagebox.askyesno("删除已完成任务", f"将永久删除 {len(task_ids)} 个已完成任务及全部历史记录，无法恢复。是否继续？", parent=self.root):
             return
         self._event_store.delete_tasks(task_ids)
         self._refresh_status_page()
@@ -814,9 +836,9 @@ class WindowsDashboardApp:
         dialog.grab_set()
         content = ttk.Frame(dialog, padding=18)
         content.pack(fill=tk.BOTH, expand=True)
-        title = tk.StringVar(value=values[2])
-        state = tk.StringVar(value=values[3])
-        summary = tk.StringVar(value=values[4])
+        title = tk.StringVar(value=values[1])
+        state = tk.StringVar(value=values[2])
+        summary = tk.StringVar(value=values[3])
         for row, label in enumerate(("任务名称", "状态", "摘要")):
             ttk.Label(content, text=label, width=10).grid(row=row, column=0, sticky=tk.W, pady=6)
         ttk.Entry(content, textvariable=title, width=48).grid(row=0, column=1, sticky=tk.EW)
