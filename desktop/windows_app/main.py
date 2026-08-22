@@ -182,7 +182,8 @@ class WindowsDashboardApp:
             background="#FFFFFF",
             fieldbackground="#FFFFFF",
             foreground="#252525",
-            rowheight=30,
+            rowheight=36,
+            font=("Microsoft YaHei UI", 11),
             borderwidth=0,
         )
         style.configure(
@@ -239,7 +240,7 @@ class WindowsDashboardApp:
         ttk.Label(task_actions, text="第一个灯是系统状态灯，从第二个灯开始计数，灯位为 1；双击可编辑，拖动可调整灯位。", foreground="#777777").pack(side=tk.LEFT)
         self._status_tree = ttk.Treeview(status_tab, columns=("led", "effect", "task", "state", "summary", "source"), show="tree headings", selectmode="none")
         self._status_tree.heading("#0", text="选择 / 排序")
-        self._status_tree.column("#0", width=115, anchor=tk.W)
+        self._status_tree.column("#0", width=155, anchor=tk.W)
         for key, title, width in (("led", "灯位", 60), ("effect", "当前灯效", 105), ("task", "任务", 190), ("state", "任务状态", 85), ("summary", "摘要", 300), ("source", "来源", 75)):
             self._status_tree.heading(key, text=title)
             self._status_tree.column(key, width=width, anchor=tk.W)
@@ -766,7 +767,7 @@ class WindowsDashboardApp:
                 image = tk.PhotoImage(width=14, height=14)
                 image.put(self._hex_color(color), to=(0, 0, 14, 14))
                 self._lamp_color_images[color] = image
-            checked = "☑" if str(record["task_id"]) in self._checked_task_ids else "☐"
+            checked = "☑  已选" if str(record["task_id"]) in self._checked_task_ids else "☐  选择"
             tree.insert("", tk.END, iid=iid, text=f"{checked}     ⠿", image=image, values=(led_position, lamp_effect, record["title"], state, record["summary"], record["source"]))
 
     def _begin_task_drag(self, event: tk.Event) -> str | None:
@@ -783,7 +784,7 @@ class WindowsDashboardApp:
         bounds = tree.bbox(row, "#0")
         relative_x = event.x - bounds[0] if bounds else 0
         task_id = self._status_task_ids.get(row)
-        if relative_x < 62 and task_id:
+        if relative_x < 108 and task_id:
             if task_id in self._checked_task_ids:
                 self._checked_task_ids.remove(task_id)
             else:
