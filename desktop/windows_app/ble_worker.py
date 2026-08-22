@@ -4,15 +4,19 @@ import asyncio
 import threading
 from collections.abc import Callable
 
+from bleak import BleakClient, BleakScanner
+
 from codex_status_core.ble_client import DashboardBLEClient
 from codex_status_core.models import DashboardSnapshot
+from codex_status_core.protocol import BLEProtocol
 
 
 class BLEWorker:
     """让 asyncio 蓝牙核心运行在后台线程，避免阻塞桌面界面。"""
 
-    def __init__(self, status_callback: Callable[[str], None]) -> None:
+    def __init__(self, status_callback: Callable[[str], None], device_id: str) -> None:
         self._status_callback = status_callback
+        self._device_id = device_id
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client: DashboardBLEClient | None = None
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
@@ -39,5 +43,57 @@ class BLEWorker:
 
     async def _async_main(self) -> None:
         self._loop = asyncio.get_running_loop()
-        self._client = DashboardBLEClient(self._status_callback)
+        self._client = DashboardBLEClient(self._status_callback, self._device_id)
         await self._client.run()
+
+
+def scan_status_devices(result_callback: Callable[[list[dict[str, object]]], None],
+                        status_callback: Callable[[str], None]) -> None:
+    """在独立线程扫描所有状态灯板，避免阻塞 Tk 主线程。"""
+    async def scan() -> None:
+        status_callback("正在扫描附近灯板")
+        discovered = await BleakScanner.discover(timeout=5, return_adv=True)
+        devices: list[dict[str, object]] = []
+        for device, advertisement in discovered.values():
+            name = advertisement.local_name or device.name
+            device_id = BLEProtocol.device_id_from_name(name)
+            if device_id is not None:
+                devices.append({
+                    "name": name or "Codex 灯板",
+                    "device_id": device_id,
+                    "address": device.address,
+                    "rssi": advertisement.rssi,
+                })
+        devices.sort(key=lambda item: int(item["rssi"]), reverse=True)
+        result_callback(devices)
+        status_callback(f"扫描完成，发现 {len(devices)} 块灯板")
+
+    def runner() -> None:
+        try:
+            asyncio.run(scan())
+        except Exception as exc:
+            status_callback(f"扫描失败：{exc}")
+            result_callback([])
+
+    threading.Thread(target=runner, daemon=True).start()
+
+
+def identify_status_device(address: str, status_callback: Callable[[str], None]) -> None:
+    """连接选中设备并触发三秒白色识别动画。"""
+    async def identify() -> None:
+        status_callback("正在连接选中灯板进行识别")
+        async with BleakClient(address) as client:
+            await client.write_gatt_char(
+                BLEProtocol.CONTROL_UUID,
+                BLEProtocol.encode_identify(0),
+                response=True,
+            )
+        status_callback("识别命令已发送，请观察白色流水灯板")
+
+    def runner() -> None:
+        try:
+            asyncio.run(identify())
+        except Exception as exc:
+            status_callback(f"识别失败：{exc}")
+
+    threading.Thread(target=runner, daemon=True).start()

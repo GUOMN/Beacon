@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
 import queue
 import tkinter as tk
 from datetime import datetime
+from pathlib import Path
 from tkinter import colorchooser, ttk
 
 from codex_status_core.models import DashboardSnapshot, StateStyle, TaskSlot, TaskState
-from windows_app.ble_worker import BLEWorker
+from windows_app.ble_worker import BLEWorker, identify_status_device, scan_status_devices
 
 class WindowsDashboardApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -16,7 +19,7 @@ class WindowsDashboardApp:
         self.root.geometry("1120x760")
         self.root.minsize(720, 580)
 
-        self._events: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self._events: queue.SimpleQueue[object] = queue.SimpleQueue()
         self._snapshot = DashboardSnapshot()
         self._remaining = tk.IntVar(value=100)
         self._period_used = tk.IntVar(value=0)
@@ -30,10 +33,18 @@ class WindowsDashboardApp:
         self._style_duties: dict[TaskState, tk.IntVar] = {}
         self._style_buttons: dict[TaskState, ttk.Button] = {}
         self._style_previews: dict[TaskState, tk.Label] = {}
+        self._device_tree: ttk.Treeview | None = None
+        self._scanned_devices: dict[str, dict[str, object]] = {}
+        self._settings_path = Path(os.getenv("APPDATA", str(Path.home()))) / \
+            "CodexStatusBridge" / "settings.json"
+        self._bound_device_id = self._load_bound_device_id()
 
         self._build_ui()
-        self._worker = BLEWorker(self._post_status)
-        self._worker.start()
+        self._worker: BLEWorker | None = None
+        if self._bound_device_id:
+            self._start_bound_worker(self._bound_device_id)
+        else:
+            self._status.set("尚未绑定灯板，请打开“设置 → 设备管理”")
         self.root.after(100, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -43,6 +54,8 @@ class WindowsDashboardApp:
 
         menu_bar = tk.Menu(self.root)
         settings_menu = tk.Menu(menu_bar, tearoff=False)
+        settings_menu.add_command(label="设备管理…", command=self._open_device_manager)
+        settings_menu.add_separator()
         settings_menu.add_command(label="灯带设置…", command=self._open_led_settings)
         menu_bar.add_cascade(label="设置", menu=settings_menu)
         self.root.configure(menu=menu_bar)
@@ -198,6 +211,9 @@ class WindowsDashboardApp:
                 for state, color in self._style_colors.items()
             },
         )
+        if self._worker is None:
+            self._post_status("尚未绑定灯板，请先在设备管理中选择并绑定")
+            return
         self._worker.submit(copy.deepcopy(self._snapshot))
 
     def _open_led_settings(self) -> None:
@@ -235,6 +251,108 @@ class WindowsDashboardApp:
         ttk.Button(buttons, text="应用", command=apply_and_close).pack(side=tk.LEFT)
         dialog.bind("<Return>", lambda _event: apply_and_close())
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
+
+    def _open_device_manager(self) -> None:
+        """扫描、识别并绑定唯一灯板，避免同名设备之间串扰。"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("设备管理")
+        dialog.geometry("650x380")
+        dialog.transient(self.root)
+
+        outer = ttk.Frame(dialog, padding=16)
+        outer.pack(fill=tk.BOTH, expand=True)
+        bound_text = self._bound_device_id or "未绑定"
+        ttk.Label(outer, text=f"当前绑定：{bound_text}").pack(anchor=tk.W, pady=(0, 10))
+
+        tree = ttk.Treeview(
+            outer,
+            columns=("name", "device_id", "rssi"),
+            show="headings",
+            selectmode="browse",
+            height=10,
+        )
+        tree.heading("name", text="设备名称")
+        tree.heading("device_id", text="唯一 ID")
+        tree.heading("rssi", text="信号强度")
+        tree.column("name", width=260)
+        tree.column("device_id", width=130, anchor=tk.CENTER)
+        tree.column("rssi", width=100, anchor=tk.CENTER)
+        tree.pack(fill=tk.BOTH, expand=True)
+        self._device_tree = tree
+        self._scanned_devices.clear()
+
+        def selected_device() -> dict[str, object] | None:
+            selected = tree.selection()
+            return self._scanned_devices.get(selected[0]) if selected else None
+
+        def identify_selected() -> None:
+            device = selected_device()
+            if device is None:
+                self._post_status("请先在列表中选择一块灯板")
+                return
+            identify_status_device(str(device["address"]), self._post_status)
+
+        def bind_selected() -> None:
+            device = selected_device()
+            if device is None:
+                self._post_status("请先在列表中选择一块灯板")
+                return
+            device_id = str(device["device_id"])
+            self._save_bound_device_id(device_id)
+            self._start_bound_worker(device_id)
+            dialog.destroy()
+
+        def unbind() -> None:
+            if self._worker is not None:
+                self._worker.stop()
+                self._worker = None
+            self._bound_device_id = None
+            self._save_bound_device_id(None)
+            self._status.set("已解除绑定，请在设备管理中选择灯板")
+            dialog.destroy()
+
+        actions = ttk.Frame(outer)
+        actions.pack(fill=tk.X, pady=(12, 0))
+        ttk.Button(
+            actions,
+            text="重新扫描",
+            command=lambda: scan_status_devices(self._post_scan_results, self._post_status),
+        ).pack(side=tk.LEFT)
+        ttk.Button(actions, text="识别（白色流水）", command=identify_selected).pack(
+            side=tk.LEFT, padx=8
+        )
+        ttk.Button(actions, text="解除绑定", command=unbind).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="绑定选中设备", command=bind_selected).pack(
+            side=tk.RIGHT, padx=8
+        )
+        scan_status_devices(self._post_scan_results, self._post_status)
+
+    def _load_bound_device_id(self) -> str | None:
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+            value = str(data.get("bound_device_id", "")).upper()
+            return value if len(value) == 6 else None
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def _save_bound_device_id(self, device_id: str | None) -> None:
+        self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+        self._settings_path.write_text(
+            json.dumps({"bound_device_id": device_id}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self._bound_device_id = device_id
+
+    def _start_bound_worker(self, device_id: str) -> None:
+        if self._worker is not None:
+            self._worker.stop()
+        self._worker = BLEWorker(self._post_status, device_id)
+        self._worker.start()
+        self._bound_device_id = device_id
+        self._status.set(f"正在连接已绑定灯板 {device_id}")
+
+    def _post_scan_results(self, devices: list[dict[str, object]]) -> None:
+        self._events.put(("scan_results", devices))
 
     def _open_debug_preview(self) -> None:
         """在真实任务数据接入前，手动预览系统灯与各任务状态。"""
@@ -339,7 +457,25 @@ class WindowsDashboardApp:
 
     def _drain_events(self) -> None:
         while not self._events.empty():
-            message = self._events.get()
+            event = self._events.get()
+            if isinstance(event, tuple) and event[0] == "scan_results":
+                devices = event[1]
+                tree = self._device_tree
+                if tree is not None and tree.winfo_exists():
+                    for item in tree.get_children():
+                        tree.delete(item)
+                    self._scanned_devices.clear()
+                    for index, device in enumerate(devices):
+                        item_id = f"device_{index}"
+                        self._scanned_devices[item_id] = device
+                        tree.insert(
+                            "",
+                            tk.END,
+                            iid=item_id,
+                            values=(device["name"], device["device_id"], f'{device["rssi"]} dBm'),
+                        )
+                continue
+            message = str(event)
             self._status.set(message)
             timestamp = datetime.now().strftime("%H:%M:%S")
             self._log.configure(state=tk.NORMAL)
@@ -349,7 +485,8 @@ class WindowsDashboardApp:
         self.root.after(100, self._drain_events)
 
     def _on_close(self) -> None:
-        self._worker.stop()
+        if self._worker is not None:
+            self._worker.stop()
         self.root.destroy()
 
 
