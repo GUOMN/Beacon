@@ -28,7 +28,7 @@ class WindowsDashboardApp:
         self._master_brightness = tk.IntVar(value=60)
         self._total_led_count = tk.IntVar(value=6)
         self._total_led_text = tk.StringVar(value="总灯数：6")
-        self._status = tk.StringVar(value="蓝牙后台启动中")
+        self._status = tk.StringVar(value="连接中")
         self._style_colors: dict[TaskState, tuple[int, int, int]] = {}
         self._style_effects: dict[TaskState, tk.StringVar] = {}
         self._style_frequencies: dict[TaskState, tk.IntVar] = {}
@@ -47,7 +47,7 @@ class WindowsDashboardApp:
         if self._bound_device_id:
             self._start_bound_worker(self._bound_device_id)
         else:
-            self._status.set("尚未绑定灯板，请打开“设置 → 设备管理”")
+            self._status.set("未连接")
         self.root.after(100, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -435,15 +435,17 @@ class WindowsDashboardApp:
 
         # 即使已绑定灯板暂时不在广播，也始终在列表中保留一行，方便取消绑定。
         if self._bound_device_id:
+            connected = bool(self._worker and self._worker.is_connected)
+            display_name = "已绑定灯板（已连接）" if connected else "已绑定灯板（正在连接）"
             self._scanned_devices["bound_device"] = {
-                "name": "已绑定灯板（等待发现）",
+                "name": display_name,
                 "device_id": self._bound_device_id,
                 "address": "",
                 "rssi": None,
             }
             tree.insert(
                 "", tk.END, iid="bound_device",
-                values=("已绑定灯板（等待发现）", self._bound_device_id, "--", "已绑定"),
+                values=(display_name, self._bound_device_id, "--", "已连接" if connected else "连接中"),
             )
 
         def selected_device() -> dict[str, object] | None:
@@ -477,7 +479,7 @@ class WindowsDashboardApp:
                 self._worker = None
             self._bound_device_id = None
             self._save_bound_device_id(None)
-            self._status.set("已解除绑定，请在设备管理中选择灯板")
+            self._status.set("未连接")
             dialog.destroy()
 
         def bind_or_unbind_selected() -> None:
@@ -589,7 +591,7 @@ class WindowsDashboardApp:
         self._worker = BLEWorker(self._post_status, device_id)
         self._worker.start()
         self._bound_device_id = device_id
-        self._status.set(f"正在连接已绑定灯板 {device_id}")
+        self._status.set("连接中")
 
     def _post_scan_results(self, devices: list[dict[str, object]]) -> None:
         self._events.put(("scan_results", devices))
@@ -983,8 +985,10 @@ class WindowsDashboardApp:
                             ),
                         )
                     if self._bound_device_id and not bound_found:
+                        connected = bool(self._worker and self._worker.is_connected)
+                        display_name = "已绑定灯板（已连接）" if connected else "已绑定灯板（当前离线）"
                         placeholder = {
-                            "name": "已绑定灯板（当前离线）",
+                            "name": display_name,
                             "device_id": self._bound_device_id,
                             "address": "",
                             "rssi": None,
@@ -993,12 +997,37 @@ class WindowsDashboardApp:
                         tree.insert(
                             "", 0, iid="bound_device",
                             values=(
-                                placeholder["name"], self._bound_device_id, "--", "已绑定"
+                                placeholder["name"], self._bound_device_id, "--",
+                                "已连接" if connected else "离线",
                             ),
                         )
                 continue
             message = str(event)
-            self._status.set(message)
+            # 顶部只展示连接生命周期；业务发送与校准消息仅写入日志。
+            if message == "蓝牙已连接":
+                self._status.set("已连接")
+            elif message == "蓝牙已断开":
+                self._status.set("未连接")
+            elif message == "正在扫描附近灯板":
+                self._status.set("扫描中")
+            elif message.startswith("扫描完成"):
+                self._status.set(
+                    "已连接" if self._worker and self._worker.is_connected else "未连接"
+                )
+            elif message.startswith("正在查找") or message.startswith("正在连接已绑定"):
+                self._status.set("连接中")
+            tree = self._device_tree
+            if tree is not None and tree.winfo_exists() and tree.exists("bound_device"):
+                if message == "蓝牙已连接":
+                    tree.item(
+                        "bound_device",
+                        values=("已绑定灯板（已连接）", self._bound_device_id, "--", "已连接"),
+                    )
+                elif message == "蓝牙已断开":
+                    tree.item(
+                        "bound_device",
+                        values=("已绑定灯板（当前离线）", self._bound_device_id, "--", "离线"),
+                    )
             timestamp = datetime.now().strftime("%H:%M:%S")
             self._log.configure(state=tk.NORMAL)
             self._log.insert(tk.END, f"{timestamp}  {message}\n")
