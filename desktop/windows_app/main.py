@@ -7,7 +7,7 @@ import queue
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import colorchooser, ttk
+from tkinter import ttk
 
 from codex_status_core.models import DashboardSnapshot, StateStyle, TaskSlot, TaskState
 from windows_app.ble_worker import BLEWorker, identify_status_device, scan_status_devices
@@ -90,8 +90,35 @@ class WindowsDashboardApp:
             background=[("active", "#1D4ED8"), ("pressed", "#1E40AF")],
             foreground=[("disabled", "#DCE7FF")],
         )
-        style.configure("TCombobox", padding=5, fieldbackground="#FFFFFF")
+        style.configure(
+            "TCombobox",
+            padding=6,
+            fieldbackground="#FFFFFF",
+            background="#EAF2FF",
+            foreground="#26364D",
+            arrowcolor="#5276A7",
+            bordercolor="#C9DAF2",
+            lightcolor="#C9DAF2",
+            darkcolor="#C9DAF2",
+            borderwidth=1,
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", "#FFFFFF")],
+            background=[("readonly", "#EAF2FF"), ("active", "#DCEAFF")],
+            bordercolor=[("focus", "#77A7F8")],
+        )
         style.configure("TSpinbox", padding=5, fieldbackground="#FFFFFF")
+        style.configure(
+            "Horizontal.TScale",
+            background="#F4F7FB",
+            troughcolor="#DDEAFF",
+            bordercolor="#DDEAFF",
+            lightcolor="#4F86F7",
+            darkcolor="#4F86F7",
+            sliderthickness=16,
+            borderwidth=0,
+        )
         style.configure(
             "Treeview",
             background="#FFFFFF",
@@ -507,12 +534,119 @@ class WindowsDashboardApp:
         return f"#{color[0]:02X}{color[1]:02X}{color[2]:02X}"
 
     def _choose_style_color(self, state: TaskState) -> None:
-        selected = colorchooser.askcolor(color=self._hex_color(self._style_colors[state]), parent=self.root)
-        if selected[0] is None:
-            return
-        self._style_colors[state] = tuple(int(channel) for channel in selected[0])
-        self._style_previews[state].configure(background=self._hex_color(self._style_colors[state]))
-        self._style_buttons[state].configure(text=self._hex_color(self._style_colors[state]))
+        """使用应用内扁平颜色面板，替代样式陈旧的系统颜色选择器。"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"选择颜色 · {state.chinese_name}")
+        dialog.geometry("480x430")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.configure(background="#F4F7FB")
+
+        outer = ttk.Frame(dialog, padding=20)
+        outer.pack(fill=tk.BOTH, expand=True)
+        current = self._style_colors[state]
+        red = tk.IntVar(value=current[0])
+        green = tk.IntVar(value=current[1])
+        blue = tk.IntVar(value=current[2])
+        hex_value = tk.StringVar(value=self._hex_color(current))
+
+        preview = tk.Label(
+            outer,
+            height=4,
+            background=hex_value.get(),
+            relief=tk.FLAT,
+            borderwidth=0,
+        )
+        preview.pack(fill=tk.X, pady=(0, 16))
+
+        updating_hex = False
+
+        def update_preview(_value: object = None) -> None:
+            nonlocal updating_hex
+            color = (red.get(), green.get(), blue.get())
+            value = self._hex_color(color)
+            preview.configure(background=value)
+            updating_hex = True
+            hex_value.set(value)
+            updating_hex = False
+
+        for label, variable in (("红色 R", red), ("绿色 G", green), ("蓝色 B", blue)):
+            row = ttk.Frame(outer)
+            row.pack(fill=tk.X, pady=5)
+            ttk.Label(row, text=label, width=8).pack(side=tk.LEFT)
+            ttk.Scale(
+                row,
+                from_=0,
+                to=255,
+                variable=variable,
+                orient=tk.HORIZONTAL,
+                command=update_preview,
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+            ttk.Label(row, textvariable=variable, width=4).pack(side=tk.RIGHT)
+
+        hex_row = ttk.Frame(outer)
+        hex_row.pack(fill=tk.X, pady=(12, 10))
+        ttk.Label(hex_row, text="十六进制", width=8).pack(side=tk.LEFT)
+        hex_entry = ttk.Entry(hex_row, textvariable=hex_value, width=12)
+        hex_entry.pack(side=tk.LEFT, padx=8)
+
+        def apply_hex(_event: object = None) -> None:
+            if updating_hex:
+                return
+            value = hex_value.get().strip().lstrip("#")
+            if len(value) != 6:
+                return
+            try:
+                channels = tuple(int(value[index:index + 2], 16) for index in (0, 2, 4))
+            except ValueError:
+                return
+            red.set(channels[0])
+            green.set(channels[1])
+            blue.set(channels[2])
+            update_preview()
+
+        hex_entry.bind("<Return>", apply_hex)
+        hex_entry.bind("<FocusOut>", apply_hex)
+
+        palette = ttk.Frame(outer)
+        palette.pack(fill=tk.X, pady=(2, 14))
+        preset_colors = (
+            "#2563EB", "#38BDF8", "#14B8A6", "#22C55E", "#84CC16",
+            "#FACC15", "#FB923C", "#F43F5E", "#EC4899", "#8B5CF6",
+        )
+        for value in preset_colors:
+            swatch = tk.Button(
+                palette,
+                background=value,
+                activebackground=value,
+                width=3,
+                height=1,
+                relief=tk.FLAT,
+                borderwidth=0,
+                cursor="hand2",
+                command=lambda selected=value: (
+                    red.set(int(selected[1:3], 16)),
+                    green.set(int(selected[3:5], 16)),
+                    blue.set(int(selected[5:7], 16)),
+                    update_preview(),
+                ),
+            )
+            swatch.pack(side=tk.LEFT, expand=True, padx=2)
+
+        def save_color() -> None:
+            color = (red.get(), green.get(), blue.get())
+            self._style_colors[state] = color
+            self._style_previews[state].configure(background=self._hex_color(color))
+            self._style_buttons[state].configure(text=self._hex_color(color))
+            dialog.destroy()
+
+        actions = ttk.Frame(outer)
+        actions.pack(fill=tk.X)
+        ttk.Button(actions, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="应用颜色", command=save_color, style="Primary.TButton").pack(
+            side=tk.RIGHT, padx=(0, 8)
+        )
 
     def _post_status(self, message: str) -> None:
         self._events.put(message)
