@@ -51,6 +51,7 @@ class WindowsDashboardApp:
             state: tk.BooleanVar(value=True)
             for state in (TaskState.RUNNING, TaskState.WAITING, TaskState.SUCCESS, TaskState.WARNING, TaskState.FAILURE)
         }
+        self._state_filter_buttons: dict[TaskState, ttk.Button] = {}
         self._drag_task_item: str | None = None
         self._drag_task_moved = False
         self._style_colors: dict[TaskState, tuple[int, int, int]] = {}
@@ -162,6 +163,22 @@ class WindowsDashboardApp:
         )
         style.map("Danger.TButton", background=[("active", "#F0DADA"), ("pressed", "#E9CCCC")])
         style.configure(
+            "FilterOn.TButton",
+            background="#E8EEF9",
+            foreground="#2457A7",
+            padding=(8, 4),
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.map("FilterOn.TButton", background=[("active", "#DDE7F7"), ("pressed", "#D4E0F3")])
+        style.configure(
+            "FilterOff.TButton",
+            background="#F1F1F1",
+            foreground="#777777",
+            padding=(8, 4),
+            font=("Microsoft YaHei UI", 9),
+        )
+        style.map("FilterOff.TButton", background=[("active", "#E8E8E8"), ("pressed", "#DEDEDE")])
+        style.configure(
             "TCombobox",
             padding=6,
             fieldbackground="#FFFFFF",
@@ -245,17 +262,19 @@ class WindowsDashboardApp:
             ttk.Label(card, text=detail, foreground="#777777").pack(anchor=tk.W, pady=(5, 0))
             metrics.columnconfigure(column, weight=1)
 
-        ttk.Label(status_tab, text="任务与灯位", font=("Microsoft YaHei UI", 12, "bold")).pack(anchor=tk.W)
-        filters = ttk.Frame(status_tab)
-        filters.pack(fill=tk.X, pady=(6, 2))
-        ttk.Label(filters, text="显示状态：", foreground="#666666").pack(side=tk.LEFT)
+        task_header = ttk.Frame(status_tab)
+        task_header.pack(fill=tk.X)
+        ttk.Label(task_header, text="任务与灯位", font=("Microsoft YaHei UI", 12, "bold")).pack(side=tk.LEFT)
+        ttk.Label(task_header, text="筛选", foreground="#777777").pack(side=tk.LEFT, padx=(18, 6))
         for state in (TaskState.RUNNING, TaskState.WAITING, TaskState.SUCCESS, TaskState.WARNING, TaskState.FAILURE):
-            ttk.Checkbutton(
-                filters,
-                text=state.chinese_name,
-                variable=self._state_filters[state],
-                command=self._refresh_status_page,
-            ).pack(side=tk.LEFT, padx=(0, 10))
+            button = ttk.Button(
+                task_header,
+                text=f"● {state.chinese_name}",
+                style="FilterOn.TButton",
+                command=lambda selected=state: self._toggle_state_filter(selected),
+            )
+            button.pack(side=tk.LEFT, padx=(0, 4))
+            self._state_filter_buttons[state] = button
         task_actions = ttk.Frame(status_tab)
         task_actions.pack(fill=tk.X, pady=(4, 8))
         ttk.Button(task_actions, text="删除选中任务", command=self._delete_selected_tasks, style="Danger.TButton").pack(side=tk.RIGHT)
@@ -765,6 +784,17 @@ class WindowsDashboardApp:
 
     def _post_codex_snapshot(self, snapshot: BridgeSnapshot) -> None:
         self._events.put(("codex_snapshot", snapshot))
+
+    def _toggle_state_filter(self, state: TaskState) -> None:
+        enabled = not self._state_filters[state].get()
+        self._state_filters[state].set(enabled)
+        button = self._state_filter_buttons.get(state)
+        if button is not None:
+            button.configure(
+                text=f"{'●' if enabled else '○'} {state.chinese_name}",
+                style="FilterOn.TButton" if enabled else "FilterOff.TButton",
+            )
+        self._refresh_status_page()
 
     def _refresh_status_page(self) -> None:
         tree = self._status_tree
