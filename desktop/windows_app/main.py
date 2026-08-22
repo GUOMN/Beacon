@@ -703,8 +703,20 @@ class WindowsDashboardApp:
             self._post_status("当前灯板的色彩校准已保存")
             dialog.destroy()
 
+        def reset_calibration() -> None:
+            defaults = {"red": 1.0, "green": 1.0, "blue": 1.0, "gamma": 2.2}
+            red.set(100)
+            green.set(100)
+            blue.set(100)
+            gamma.set(2.2)
+            self._save_device_calibration(defaults)
+            self._post_status("当前灯板的色彩校准已恢复默认值")
+
         actions = ttk.Frame(outer)
         actions.pack(fill=tk.X, side=tk.BOTTOM, pady=(20, 0))
+        ttk.Button(
+            actions, text="一键重置", command=reset_calibration, style="Danger.TButton"
+        ).pack(side=tk.LEFT)
         ttk.Button(actions, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
         ttk.Button(
             actions, text="保存校准", command=save_and_close, style="Primary.TButton"
