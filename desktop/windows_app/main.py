@@ -36,6 +36,7 @@ class WindowsDashboardApp:
         self._total_led_count = tk.IntVar(value=6)
         self._total_led_text = tk.StringVar(value="总灯数：6")
         self._status = tk.StringVar(value="连接中")
+        self._preview_active = False
         self._style_colors: dict[TaskState, tuple[int, int, int]] = {}
         self._style_effects: dict[TaskState, tk.StringVar] = {}
         self._style_frequencies: dict[TaskState, tk.IntVar] = {}
@@ -873,9 +874,7 @@ class WindowsDashboardApp:
 
         def send_preview() -> None:
             name_to_state = {state.chinese_name: state for state in TaskState}
-            self._remaining.set(max(0, min(100, remaining.get())))
-            self._period_used.set(max(0, min(100, period_used.get())))
-            self._snapshot.tasks = [
+            preview_tasks = [
                 TaskSlot(
                     title=f"任务 {index + 1}",
                     state=name_to_state[state_var.get()],
@@ -883,14 +882,39 @@ class WindowsDashboardApp:
                 )
                 for index, state_var in enumerate(state_vars)
             ]
+            preview_snapshot = DashboardSnapshot(
+                remaining_percent=max(0, min(100, remaining.get())),
+                period_used_percent=max(0, min(100, period_used.get())),
+                master_brightness_percent=max(0, min(100, self._master_brightness.get())),
+                tasks=preview_tasks,
+                state_styles={
+                    state: StateStyle(
+                        color=self._calibrate_color(color),
+                        effect={"常亮": 1, "闪烁": 2, "呼吸": 3}[self._style_effects[state].get()],
+                        period_ms=max(200, min(10000, round(60000 / max(6, min(300, self._style_frequencies[state].get()))))),
+                        blink_duty_percent=max(1, min(100, self._style_duties[state].get())),
+                    )
+                    for state, color in self._style_colors.items()
+                },
+            )
+            self._preview_active = True
+            if self._worker is not None:
+                self._worker.submit(preview_snapshot)
+                self._post_status("已应用临时预览数据")
+
+        def close_preview() -> None:
+            # Mock 数据只存在于弹窗生命周期中；关闭后立即恢复正式数据源快照。
+            self._preview_active = False
+            dialog.destroy()
             self._send()
 
         actions = ttk.Frame(outer)
         actions.pack(fill=tk.X)
-        ttk.Button(actions, text="关闭", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="结束预览并恢复正式数据", command=close_preview).pack(side=tk.RIGHT)
         ttk.Button(
-            actions, text="应用 Mock 数据并预览", command=send_preview, style="Primary.TButton"
+            actions, text="应用预览数据", command=send_preview, style="Primary.TButton"
         ).pack(side=tk.RIGHT, padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", close_preview)
         self._fit_dialog(dialog, 620, 700, 540, 520)
 
     @staticmethod
@@ -1092,7 +1116,7 @@ class WindowsDashboardApp:
                 local_snapshot = event[1]
                 self._period_used.set(local_snapshot.busy_percent)
                 self._snapshot.tasks = local_snapshot.tasks
-                if self._worker is not None and self._worker.is_connected:
+                if not self._preview_active and self._worker is not None and self._worker.is_connected:
                     self._send()
                 continue
             message = str(event)
