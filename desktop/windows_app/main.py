@@ -251,8 +251,17 @@ class WindowsDashboardApp:
         system.pack(fill=tk.X)
         remaining = tk.IntVar(value=self._remaining.get())
         period_used = tk.IntVar(value=self._period_used.get())
-        self._add_scale(system, "剩余额度", remaining, 0)
-        self._add_scale(system, "周期已用", period_used, 1)
+        self._add_scale(system, "总体额度剩余", remaining, 0)
+        self._add_scale(system, "短时繁忙程度", period_used, 1)
+        ttk.Label(
+            system,
+            text=(
+                "第一颗系统灯：颜色表示总体额度剩余，绿色充足、红色紧张；\n"
+                "闪烁频率表示近期任务或请求的繁忙程度，数值越高闪烁越快。"
+            ),
+            foreground="#666666",
+            justify=tk.LEFT,
+        ).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
         system.columnconfigure(1, weight=1)
 
         task_frame = ttk.LabelFrame(outer, text="任务灯状态预览", padding=10)
