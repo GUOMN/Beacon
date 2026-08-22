@@ -6,6 +6,7 @@ import json
 import math
 import os
 import queue
+import sys
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -13,6 +14,10 @@ from tkinter import ttk
 
 from codex_status_core.models import DashboardSnapshot, StateStyle, TaskSlot, TaskState
 from windows_app.ble_worker import BLEWorker, identify_status_device, scan_status_devices
+from codex_status_core.event_data_source import EventDataSource
+from codex_status_core.event_store import BridgeSnapshot, EventIngestServer, StatusEventStore
+from codex_status_core.hook_adapter import report_hook
+from codex_status_core.hook_manager import install as install_hook, providers as hook_providers, status as hook_status, uninstall as uninstall_hook
 
 class WindowsDashboardApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -48,6 +53,16 @@ class WindowsDashboardApp:
             self._start_bound_worker(self._bound_device_id)
         else:
             self._status.set("未连接")
+        self._event_store = StatusEventStore()
+        self._event_server = EventIngestServer(self._event_store)
+        self._event_server.start()
+        self._codex_data_source = EventDataSource(
+            self._event_store,
+            self._post_codex_snapshot,
+            self._post_status,
+            lambda: max(1, self._total_led_count.get() - 1),
+        )
+        self._codex_data_source.start()
         self.root.after(100, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -168,6 +183,7 @@ class WindowsDashboardApp:
             foreground="#252525",
         ).pack(side=tk.LEFT, anchor=tk.W)
         ttk.Button(top_bar, text="设备管理", command=self._open_device_manager).pack(side=tk.RIGHT)
+        ttk.Button(top_bar, text="数据源", command=self._open_data_sources).pack(side=tk.RIGHT, padx=(0, 8))
         ttk.Button(top_bar, text="灯带校准", command=self._open_calibration).pack(
             side=tk.RIGHT, padx=(0, 8)
         )
@@ -349,6 +365,53 @@ class WindowsDashboardApp:
         y = max(20, (screen_height - height) // 2)
         dialog.minsize(min(minimum_width, width), min(minimum_height, height))
         dialog.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _open_data_sources(self) -> None:
+        """管理官方 Hook；只有用户点击时才修改对应工具配置。"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("任务数据源")
+        dialog.transient(self.root)
+        dialog.configure(background="#F7F7F7")
+        body = ttk.Frame(dialog, padding=20)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text="官方 Hook 数据源", font=("Microsoft YaHei UI", 15, "bold")).pack(anchor=tk.W)
+        ttk.Label(
+            body,
+            text="事件写入本应用 SQLite，再自动映射到灯板。不会保存提示词正文；上报失败不影响原任务。",
+            foreground="#666666",
+            wraplength=690,
+        ).pack(anchor=tk.W, pady=(6, 16))
+        rows = ttk.Frame(body)
+        rows.pack(fill=tk.BOTH, expand=True)
+
+        def refresh() -> None:
+            for child in rows.winfo_children():
+                child.destroy()
+            for index, provider in enumerate(hook_providers()):
+                state = hook_status(provider)
+                ttk.Label(rows, text=provider.name, width=22, font=("Microsoft YaHei UI", 10, "bold")).grid(row=index, column=0, sticky=tk.W, pady=7)
+                ttk.Label(rows, text=state, width=10, foreground="#39734D" if state == "已启用" else "#666666").grid(row=index, column=1, sticky=tk.W)
+                note = provider.note or "开始、等待、完成和失败事件"
+                ttk.Label(rows, text=note, foreground="#777777", wraplength=300).grid(row=index, column=2, sticky=tk.W, padx=(8, 12))
+                if provider.supported:
+                    action = uninstall_hook if state == "已启用" else install_hook
+                    label = "停用" if state == "已启用" else "启用"
+
+                    def run(selected=provider, operation=action) -> None:
+                        try:
+                            operation(selected)
+                            self._post_status(f"{selected.name} 数据源配置已更新")
+                        except Exception as exc:
+                            self._post_status(f"{selected.name} 配置失败：{exc}")
+                        refresh()
+
+                    ttk.Button(rows, text=label, command=run).grid(row=index, column=3, sticky=tk.E)
+            rows.columnconfigure(2, weight=1)
+
+        refresh()
+        ttk.Button(body, text="关闭", command=dialog.destroy).pack(anchor=tk.E, pady=(16, 0))
+        self._fit_dialog(dialog, 780, 520, 620, 420)
+        dialog.grab_set()
 
     def _send(self) -> None:
         # 主界面不再人工编辑任务。发送时保留外部数据源已有状态，新增灯位默认空闲。
@@ -613,6 +676,9 @@ class WindowsDashboardApp:
 
     def _post_scan_results(self, devices: list[dict[str, object]]) -> None:
         self._events.put(("scan_results", devices))
+
+    def _post_codex_snapshot(self, snapshot: BridgeSnapshot) -> None:
+        self._events.put(("codex_snapshot", snapshot))
 
     def _open_calibration(self) -> None:
         """为当前绑定灯板调整通道增益和伽马，并按唯一 ID 保存。"""
@@ -1020,10 +1086,19 @@ class WindowsDashboardApp:
                             ),
                         )
                 continue
+            if isinstance(event, tuple) and event[0] == "codex_snapshot":
+                local_snapshot = event[1]
+                self._period_used.set(local_snapshot.busy_percent)
+                self._snapshot.tasks = local_snapshot.tasks
+                if self._worker is not None and self._worker.is_connected:
+                    self._send()
+                continue
             message = str(event)
             # 顶部只展示连接生命周期；业务发送与校准消息仅写入日志。
             if message == "蓝牙已连接":
                 self._status.set("已连接")
+                # 重连后立即补发最新 Codex 状态，不等待下一次数据库变化。
+                self._send()
             elif message == "蓝牙已断开":
                 self._status.set("未连接")
             elif message == "正在扫描附近灯板":
@@ -1054,12 +1129,16 @@ class WindowsDashboardApp:
         self.root.after(100, self._drain_events)
 
     def _on_close(self) -> None:
+        self._codex_data_source.stop()
+        self._event_server.stop()
         if self._worker is not None:
             self._worker.stop()
         self.root.destroy()
 
 
 def main() -> None:
+    if len(sys.argv) >= 4 and sys.argv[1] == "--status-bridge-hook":
+        raise SystemExit(report_hook(sys.argv[2], sys.argv[3]))
     root = tk.Tk()
     WindowsDashboardApp(root)
     root.mainloop()
