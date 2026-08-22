@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import colorsys
 import json
+import math
 import os
 import queue
 import tkinter as tk
@@ -90,6 +92,14 @@ class WindowsDashboardApp:
             background=[("active", "#1D4ED8"), ("pressed", "#1E40AF")],
             foreground=[("disabled", "#DCE7FF")],
         )
+        style.configure(
+            "Danger.TButton",
+            background="#FFE5E8",
+            foreground="#B42335",
+            borderwidth=0,
+            padding=(12, 7),
+        )
+        style.map("Danger.TButton", background=[("active", "#FFD2D8"), ("pressed", "#FFC2CA")])
         style.configure(
             "TCombobox",
             padding=6,
@@ -351,17 +361,21 @@ class WindowsDashboardApp:
         """扫描、识别并绑定唯一灯板，避免同名设备之间串扰。"""
         dialog = tk.Toplevel(self.root)
         dialog.title("设备管理")
-        dialog.geometry("650x380")
+        dialog.geometry("680x440")
         dialog.transient(self.root)
 
         outer = ttk.Frame(dialog, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         bound_text = self._bound_device_id or "未绑定"
-        ttk.Label(outer, text=f"当前绑定：{bound_text}").pack(anchor=tk.W, pady=(0, 10))
+        ttk.Label(
+            outer,
+            text=f"当前绑定：{bound_text}",
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(anchor=tk.W, pady=(0, 12))
 
         tree = ttk.Treeview(
             outer,
-            columns=("name", "device_id", "rssi"),
+            columns=("name", "device_id", "rssi", "binding"),
             show="headings",
             selectmode="browse",
             height=10,
@@ -369,12 +383,27 @@ class WindowsDashboardApp:
         tree.heading("name", text="设备名称")
         tree.heading("device_id", text="唯一 ID")
         tree.heading("rssi", text="信号强度")
+        tree.heading("binding", text="绑定状态")
         tree.column("name", width=260)
         tree.column("device_id", width=130, anchor=tk.CENTER)
-        tree.column("rssi", width=100, anchor=tk.CENTER)
+        tree.column("rssi", width=90, anchor=tk.CENTER)
+        tree.column("binding", width=90, anchor=tk.CENTER)
         tree.pack(fill=tk.BOTH, expand=True)
         self._device_tree = tree
         self._scanned_devices.clear()
+
+        # 即使已绑定灯板暂时不在广播，也始终在列表中保留一行，方便取消绑定。
+        if self._bound_device_id:
+            self._scanned_devices["bound_device"] = {
+                "name": "已绑定灯板（等待发现）",
+                "device_id": self._bound_device_id,
+                "address": "",
+                "rssi": None,
+            }
+            tree.insert(
+                "", tk.END, iid="bound_device",
+                values=("已绑定灯板（等待发现）", self._bound_device_id, "--", "已绑定"),
+            )
 
         def selected_device() -> dict[str, object] | None:
             selected = tree.selection()
@@ -385,7 +414,11 @@ class WindowsDashboardApp:
             if device is None:
                 self._post_status("请先在列表中选择一块灯板")
                 return
-            identify_status_device(str(device["address"]), self._post_status)
+            address = str(device.get("address", ""))
+            if not address:
+                self._post_status("已绑定灯板当前未被扫描到，暂时不能识别")
+                return
+            identify_status_device(address, self._post_status)
 
         def bind_selected() -> None:
             device = selected_device()
@@ -406,6 +439,28 @@ class WindowsDashboardApp:
             self._status.set("已解除绑定，请在设备管理中选择灯板")
             dialog.destroy()
 
+        def bind_or_unbind_selected() -> None:
+            device = selected_device()
+            if device is None:
+                self._post_status("请先在列表中选择一块灯板")
+                return
+            if str(device["device_id"]).upper() == (self._bound_device_id or "").upper():
+                unbind()
+            else:
+                bind_selected()
+
+        def update_actions(_event: object = None) -> None:
+            device = selected_device()
+            is_bound = bool(
+                device
+                and str(device["device_id"]).upper() == (self._bound_device_id or "").upper()
+            )
+            identify_button.configure(state=tk.DISABLED if is_bound else tk.NORMAL)
+            bind_button.configure(
+                text="取消绑定" if is_bound else "绑定选中设备",
+                style="Danger.TButton" if is_bound else "Primary.TButton",
+            )
+
         actions = ttk.Frame(outer)
         actions.pack(fill=tk.X, pady=(12, 0))
         ttk.Button(
@@ -413,13 +468,15 @@ class WindowsDashboardApp:
             text="重新扫描",
             command=lambda: scan_status_devices(self._post_scan_results, self._post_status),
         ).pack(side=tk.LEFT)
-        ttk.Button(actions, text="识别（白色流水）", command=identify_selected).pack(
+        identify_button = ttk.Button(actions, text="识别（白色流水）", command=identify_selected)
+        identify_button.pack(
             side=tk.LEFT, padx=8
         )
-        ttk.Button(actions, text="解除绑定", command=unbind).pack(side=tk.RIGHT)
-        ttk.Button(actions, text="绑定选中设备", command=bind_selected).pack(
+        bind_button = ttk.Button(actions, text="绑定选中设备", command=bind_or_unbind_selected)
+        bind_button.pack(
             side=tk.RIGHT, padx=8
         )
+        tree.bind("<<TreeviewSelect>>", update_actions)
         scan_status_devices(self._post_scan_results, self._post_status)
 
     def _load_bound_device_id(self) -> str | None:
@@ -534,10 +591,10 @@ class WindowsDashboardApp:
         return f"#{color[0]:02X}{color[1]:02X}{color[2]:02X}"
 
     def _choose_style_color(self, state: TaskState) -> None:
-        """使用应用内扁平颜色面板，替代样式陈旧的系统颜色选择器。"""
+        """使用 HSV 色环选择颜色，明度单独调节。"""
         dialog = tk.Toplevel(self.root)
         dialog.title(f"选择颜色 · {state.chinese_name}")
-        dialog.geometry("480x430")
+        dialog.geometry("470x520")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -546,54 +603,97 @@ class WindowsDashboardApp:
         outer = ttk.Frame(dialog, padding=20)
         outer.pack(fill=tk.BOTH, expand=True)
         current = self._style_colors[state]
-        red = tk.IntVar(value=current[0])
-        green = tk.IntVar(value=current[1])
-        blue = tk.IntVar(value=current[2])
+        hue, saturation, brightness = colorsys.rgb_to_hsv(*(channel / 255 for channel in current))
+        selected_hue = hue
+        selected_saturation = saturation
+        brightness_value = tk.IntVar(value=round(brightness * 100))
         hex_value = tk.StringVar(value=self._hex_color(current))
 
-        preview = tk.Label(
-            outer,
-            height=4,
-            background=hex_value.get(),
-            relief=tk.FLAT,
-            borderwidth=0,
+        ttk.Label(outer, text="拖动色环选择色相与饱和度").pack(anchor=tk.W)
+        wheel_size = 260
+        radius = wheel_size // 2 - 4
+        center = wheel_size // 2
+        canvas = tk.Canvas(
+            outer, width=wheel_size, height=wheel_size, background="#F4F7FB",
+            highlightthickness=0, cursor="crosshair",
         )
-        preview.pack(fill=tk.X, pady=(0, 16))
+        canvas.pack(pady=(8, 12))
+        wheel = tk.PhotoImage(width=wheel_size, height=wheel_size)
+        rows: list[str] = []
+        for y in range(wheel_size):
+            row: list[str] = []
+            for x in range(wheel_size):
+                dx, dy = x - center, y - center
+                distance = math.hypot(dx, dy)
+                if distance <= radius:
+                    pixel_hue = (math.atan2(dy, dx) / (2 * math.pi)) % 1.0
+                    pixel_saturation = distance / radius
+                    channels = colorsys.hsv_to_rgb(pixel_hue, pixel_saturation, 1.0)
+                    row.append("#%02X%02X%02X" % tuple(round(value * 255) for value in channels))
+                else:
+                    row.append("#F4F7FB")
+            rows.append("{" + " ".join(row) + "}")
+        wheel.put(" ".join(rows))
+        canvas.create_image(0, 0, image=wheel, anchor=tk.NW)
+        canvas.wheel_image = wheel
+        marker = canvas.create_oval(0, 0, 12, 12, outline="white", width=3)
 
-        updating_hex = False
-
-        def update_preview(_value: object = None) -> None:
-            nonlocal updating_hex
-            color = (red.get(), green.get(), blue.get())
-            value = self._hex_color(color)
-            preview.configure(background=value)
-            updating_hex = True
-            hex_value.set(value)
-            updating_hex = False
-
-        for label, variable in (("红色 R", red), ("绿色 G", green), ("蓝色 B", blue)):
-            row = ttk.Frame(outer)
-            row.pack(fill=tk.X, pady=5)
-            ttk.Label(row, text=label, width=8).pack(side=tk.LEFT)
-            ttk.Scale(
-                row,
-                from_=0,
-                to=255,
-                variable=variable,
-                orient=tk.HORIZONTAL,
-                command=update_preview,
-            ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
-            ttk.Label(row, textvariable=variable, width=4).pack(side=tk.RIGHT)
+        preview_row = ttk.Frame(outer)
+        preview_row.pack(fill=tk.X)
+        preview = tk.Label(preview_row, width=8, background=hex_value.get(), relief=tk.FLAT)
+        preview.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
 
         hex_row = ttk.Frame(outer)
-        hex_row.pack(fill=tk.X, pady=(12, 10))
-        ttk.Label(hex_row, text="十六进制", width=8).pack(side=tk.LEFT)
+        hex_row.pack(fill=tk.X, pady=(10, 12))
+        ttk.Label(hex_row, text="色值", width=8).pack(side=tk.LEFT)
         hex_entry = ttk.Entry(hex_row, textvariable=hex_value, width=12)
         hex_entry.pack(side=tk.LEFT, padx=8)
 
+        def selected_color() -> tuple[int, int, int]:
+            channels = colorsys.hsv_to_rgb(
+                selected_hue, selected_saturation, brightness_value.get() / 100
+            )
+            return tuple(round(value * 255) for value in channels)
+
+        def update_preview(_value: object = None) -> None:
+            value = self._hex_color(selected_color())
+            preview.configure(background=value)
+            hex_value.set(value)
+
+        def update_marker() -> None:
+            angle = selected_hue * 2 * math.pi
+            distance = selected_saturation * radius
+            x = center + math.cos(angle) * distance
+            y = center + math.sin(angle) * distance
+            canvas.coords(marker, x - 6, y - 6, x + 6, y + 6)
+
+        def select_from_wheel(event: tk.Event) -> None:
+            nonlocal selected_hue, selected_saturation
+            dx, dy = event.x - center, event.y - center
+            distance = math.hypot(dx, dy)
+            if distance > radius:
+                scale = radius / distance
+                dx, dy, distance = dx * scale, dy * scale, radius
+            selected_hue = (math.atan2(dy, dx) / (2 * math.pi)) % 1.0
+            selected_saturation = distance / radius
+            update_marker()
+            update_preview()
+
+        canvas.bind("<Button-1>", select_from_wheel)
+        canvas.bind("<B1-Motion>", select_from_wheel)
+        update_marker()
+
+        brightness_row = ttk.Frame(outer)
+        brightness_row.pack(fill=tk.X)
+        ttk.Label(brightness_row, text="明度", width=8).pack(side=tk.LEFT)
+        ttk.Scale(
+            brightness_row, from_=0, to=100, variable=brightness_value,
+            orient=tk.HORIZONTAL, command=update_preview,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+        ttk.Label(brightness_row, textvariable=brightness_value, width=4).pack(side=tk.RIGHT)
+
         def apply_hex(_event: object = None) -> None:
-            if updating_hex:
-                return
+            nonlocal selected_hue, selected_saturation
             value = hex_value.get().strip().lstrip("#")
             if len(value) != 6:
                 return
@@ -601,41 +701,18 @@ class WindowsDashboardApp:
                 channels = tuple(int(value[index:index + 2], 16) for index in (0, 2, 4))
             except ValueError:
                 return
-            red.set(channels[0])
-            green.set(channels[1])
-            blue.set(channels[2])
+            selected_hue, selected_saturation, selected_brightness = colorsys.rgb_to_hsv(
+                *(channel / 255 for channel in channels)
+            )
+            brightness_value.set(round(selected_brightness * 100))
+            update_marker()
             update_preview()
 
         hex_entry.bind("<Return>", apply_hex)
         hex_entry.bind("<FocusOut>", apply_hex)
 
-        palette = ttk.Frame(outer)
-        palette.pack(fill=tk.X, pady=(2, 14))
-        preset_colors = (
-            "#2563EB", "#38BDF8", "#14B8A6", "#22C55E", "#84CC16",
-            "#FACC15", "#FB923C", "#F43F5E", "#EC4899", "#8B5CF6",
-        )
-        for value in preset_colors:
-            swatch = tk.Button(
-                palette,
-                background=value,
-                activebackground=value,
-                width=3,
-                height=1,
-                relief=tk.FLAT,
-                borderwidth=0,
-                cursor="hand2",
-                command=lambda selected=value: (
-                    red.set(int(selected[1:3], 16)),
-                    green.set(int(selected[3:5], 16)),
-                    blue.set(int(selected[5:7], 16)),
-                    update_preview(),
-                ),
-            )
-            swatch.pack(side=tk.LEFT, expand=True, padx=2)
-
         def save_color() -> None:
-            color = (red.get(), green.get(), blue.get())
+            color = selected_color()
             self._style_colors[state] = color
             self._style_previews[state].configure(background=self._hex_color(color))
             self._style_buttons[state].configure(text=self._hex_color(color))
@@ -667,14 +744,38 @@ class WindowsDashboardApp:
                     for item in tree.get_children():
                         tree.delete(item)
                     self._scanned_devices.clear()
+                    bound_found = False
                     for index, device in enumerate(devices):
                         item_id = f"device_{index}"
                         self._scanned_devices[item_id] = device
+                        is_bound = str(device["device_id"]).upper() == (
+                            self._bound_device_id or ""
+                        ).upper()
+                        bound_found = bound_found or is_bound
                         tree.insert(
                             "",
                             tk.END,
                             iid=item_id,
-                            values=(device["name"], device["device_id"], f'{device["rssi"]} dBm'),
+                            values=(
+                                device["name"],
+                                device["device_id"],
+                                f'{device["rssi"]} dBm',
+                                "已绑定" if is_bound else "未绑定",
+                            ),
+                        )
+                    if self._bound_device_id and not bound_found:
+                        placeholder = {
+                            "name": "已绑定灯板（当前离线）",
+                            "device_id": self._bound_device_id,
+                            "address": "",
+                            "rssi": None,
+                        }
+                        self._scanned_devices["bound_device"] = placeholder
+                        tree.insert(
+                            "", 0, iid="bound_device",
+                            values=(
+                                placeholder["name"], self._bound_device_id, "--", "已绑定"
+                            ),
                         )
                 continue
             message = str(event)
