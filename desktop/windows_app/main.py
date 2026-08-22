@@ -54,87 +54,88 @@ class WindowsDashboardApp:
     def _build_ui(self) -> None:
         style = ttk.Style(self.root)
         style.theme_use("clam")
-        self.root.configure(background="#F4F7FB")
+        # 采用接近 Codex 浅色模式的中性灰白色系，避免大面积高饱和蓝色。
+        self.root.configure(background="#F7F7F7")
         self.root.option_add("*Font", ("Microsoft YaHei UI", 10))
         style.configure(".", font=("Microsoft YaHei UI", 10))
-        style.configure("TFrame", background="#F4F7FB")
-        style.configure("TLabel", background="#F4F7FB", foreground="#172033")
+        style.configure("TFrame", background="#F7F7F7")
+        style.configure("TLabel", background="#F7F7F7", foreground="#252525")
         style.configure(
             "TLabelframe",
-            background="#F4F7FB",
-            bordercolor="#D9E2EF",
+            background="#F7F7F7",
+            bordercolor="#E1E1E1",
             borderwidth=1,
             relief="solid",
         )
         style.configure(
             "TLabelframe.Label",
-            background="#F4F7FB",
-            foreground="#172033",
+            background="#F7F7F7",
+            foreground="#252525",
             font=("Microsoft YaHei UI", 10, "bold"),
         )
         style.configure(
             "TButton",
-            background="#EEF3FA",
-            foreground="#24324A",
+            background="#ECECEC",
+            foreground="#292929",
             borderwidth=0,
             padding=(14, 9),
             focusthickness=0,
         )
-        style.map("TButton", background=[("active", "#D9E5F3"), ("pressed", "#CAD9EC")])
+        style.map("TButton", background=[("active", "#E2E2E2"), ("pressed", "#D8D8D8")])
         style.configure(
             "Preview.TButton",
-            background="#E8F0FF",
-            foreground="#1D4ED8",
+            background="#E9E9E9",
+            foreground="#202020",
             font=("Microsoft YaHei UI", 11, "bold"),
             padding=(22, 14),
         )
-        style.map("Preview.TButton", background=[("active", "#DCE8FF"), ("pressed", "#CEDDFF")])
+        style.map("Preview.TButton", background=[("active", "#DEDEDE"), ("pressed", "#D4D4D4")])
         style.configure(
             "Primary.TButton",
-            background="#2563EB",
+            background="#202020",
             foreground="#FFFFFF",
             font=("Microsoft YaHei UI", 11, "bold"),
             padding=(20, 11),
         )
         style.map(
             "Primary.TButton",
-            background=[("active", "#1D4ED8"), ("pressed", "#1E40AF")],
-            foreground=[("disabled", "#DCE7FF")],
+            background=[("active", "#343434"), ("pressed", "#111111")],
+            foreground=[("disabled", "#BDBDBD")],
         )
         style.configure(
             "Danger.TButton",
-            background="#FFE5E8",
-            foreground="#B42335",
+            background="#F7E8E8",
+            foreground="#A12B2B",
             borderwidth=0,
             padding=(12, 7),
         )
-        style.map("Danger.TButton", background=[("active", "#FFD2D8"), ("pressed", "#FFC2CA")])
+        style.map("Danger.TButton", background=[("active", "#F0DADA"), ("pressed", "#E9CCCC")])
         style.configure(
             "TCombobox",
             padding=6,
             fieldbackground="#FFFFFF",
-            background="#EAF2FF",
-            foreground="#26364D",
-            arrowcolor="#5276A7",
-            bordercolor="#C9DAF2",
-            lightcolor="#C9DAF2",
-            darkcolor="#C9DAF2",
+            background="#F2F2F2",
+            foreground="#292929",
+            arrowcolor="#626262",
+            bordercolor="#D8D8D8",
+            lightcolor="#D8D8D8",
+            darkcolor="#D8D8D8",
             borderwidth=1,
         )
         style.map(
             "TCombobox",
             fieldbackground=[("readonly", "#FFFFFF")],
-            background=[("readonly", "#EAF2FF"), ("active", "#DCEAFF")],
-            bordercolor=[("focus", "#77A7F8")],
+            background=[("readonly", "#F2F2F2"), ("active", "#E8E8E8")],
+            bordercolor=[("focus", "#A8A8A8")],
         )
         style.configure("TSpinbox", padding=5, fieldbackground="#FFFFFF")
         style.configure(
             "Horizontal.TScale",
-            background="#F4F7FB",
-            troughcolor="#DDEAFF",
-            bordercolor="#DDEAFF",
-            lightcolor="#4F86F7",
-            darkcolor="#4F86F7",
+            background="#F7F7F7",
+            troughcolor="#DEDEDE",
+            bordercolor="#DEDEDE",
+            lightcolor="#555555",
+            darkcolor="#555555",
             sliderthickness=16,
             borderwidth=0,
         )
@@ -142,18 +143,18 @@ class WindowsDashboardApp:
             "Treeview",
             background="#FFFFFF",
             fieldbackground="#FFFFFF",
-            foreground="#172033",
+            foreground="#252525",
             rowheight=30,
             borderwidth=0,
         )
         style.configure(
             "Treeview.Heading",
-            background="#E8EEF7",
-            foreground="#26364D",
+            background="#EEEEEE",
+            foreground="#303030",
             font=("Microsoft YaHei UI", 10, "bold"),
             padding=7,
         )
-        style.map("Treeview", background=[("selected", "#DCE8FF")], foreground=[("selected", "#163A75")])
+        style.map("Treeview", background=[("selected", "#E2E2E2")], foreground=[("selected", "#202020")])
 
         outer = ttk.Frame(self.root, padding=18)
         outer.pack(fill=tk.BOTH, expand=True)
@@ -164,7 +165,7 @@ class WindowsDashboardApp:
             top_bar,
             textvariable=self._status,
             font=("Microsoft YaHei UI", 15, "bold"),
-            foreground="#163A75",
+            foreground="#252525",
         ).pack(side=tk.LEFT, anchor=tk.W)
         ttk.Button(top_bar, text="设备管理", command=self._open_device_manager).pack(side=tk.RIGHT)
         ttk.Button(top_bar, text="灯带校准", command=self._open_calibration).pack(
@@ -236,22 +237,39 @@ class WindowsDashboardApp:
                 themes, from_=6, to=300, textvariable=frequency_var, width=6,
             )
             frequency_input.grid(row=row, column=4, padx=(8, 2))
-            ttk.Label(themes, text="次/分").grid(row=row, column=5, sticky=tk.W)
+            frequency_label = ttk.Label(themes, text="次/分")
+            frequency_label.grid(row=row, column=5, sticky=tk.W)
             duty_input = ttk.Spinbox(
                 themes, from_=1, to=100, textvariable=duty_var, width=5,
             )
             duty_input.grid(row=row, column=6, padx=(8, 2))
-            ttk.Label(themes, text="%亮").grid(row=row, column=7, sticky=tk.W)
+            duty_label = ttk.Label(themes, text="占空比 %")
+            duty_label.grid(row=row, column=7, sticky=tk.W)
 
             def update_timing_inputs(
                 _event: object = None,
                 selected_effect: tk.StringVar = effect_var,
                 frequency_widget: ttk.Spinbox = frequency_input,
+                frequency_text: ttk.Label = frequency_label,
                 duty_widget: ttk.Spinbox = duty_input,
+                duty_text: ttk.Label = duty_label,
             ) -> None:
                 effect_name = selected_effect.get()
-                frequency_widget.configure(state="normal" if effect_name != "常亮" else "disabled")
-                duty_widget.configure(state="normal" if effect_name == "闪烁" else "disabled")
+                if effect_name == "常亮":
+                    frequency_widget.grid_remove()
+                    frequency_text.grid_remove()
+                    duty_widget.grid_remove()
+                    duty_text.grid_remove()
+                elif effect_name == "呼吸":
+                    frequency_widget.grid()
+                    frequency_text.grid()
+                    duty_widget.grid_remove()
+                    duty_text.grid_remove()
+                else:
+                    frequency_widget.grid()
+                    frequency_text.grid()
+                    duty_widget.grid()
+                    duty_text.grid()
 
             effect_input.bind("<<ComboboxSelected>>", update_timing_inputs)
             update_timing_inputs()
@@ -266,7 +284,7 @@ class WindowsDashboardApp:
         ttk.Label(
             preview_area,
             text="设置一组 Mock 数据，\n即时查看灯带效果",
-            foreground="#718096",
+            foreground="#707070",
             justify=tk.CENTER,
         ).pack(pady=(10, 0))
 
@@ -283,10 +301,10 @@ class WindowsDashboardApp:
             height=12,
             state=tk.DISABLED,
             font=("Cascadia Mono", 9),
-            background="#111827",
-            foreground="#D1E0F5",
-            insertbackground="#FFFFFF",
-            selectbackground="#31598F",
+            background="#FFFFFF",
+            foreground="#3A3A3A",
+            insertbackground="#202020",
+            selectbackground="#DDDDDD",
             relief=tk.FLAT,
             borderwidth=0,
             padx=12,
@@ -615,7 +633,7 @@ class WindowsDashboardApp:
         ttk.Label(
             outer,
             text="先发送测试色，再对照实际灯光调整。参数只保存到当前设备。",
-            foreground="#718096",
+            foreground="#707070",
         ).pack(anchor=tk.W, pady=(4, 18))
 
         red = tk.IntVar(value=round(self._calibration["red"] * 100))
@@ -696,7 +714,7 @@ class WindowsDashboardApp:
         ttk.Label(
             outer,
             text="建议顺序：先用中性白调三个通道，再用中灰调整伽马，最后检查综合色。",
-            foreground="#718096",
+            foreground="#707070",
             wraplength=520,
         ).pack(anchor=tk.W)
 
@@ -818,7 +836,7 @@ class WindowsDashboardApp:
         dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.configure(background="#F4F7FB")
+        dialog.configure(background="#F7F7F7")
 
         outer = ttk.Frame(dialog, padding=20)
         outer.pack(fill=tk.BOTH, expand=True)
@@ -834,7 +852,7 @@ class WindowsDashboardApp:
         radius = wheel_size // 2 - 4
         center = wheel_size // 2
         canvas = tk.Canvas(
-            outer, width=wheel_size, height=wheel_size, background="#F4F7FB",
+            outer, width=wheel_size, height=wheel_size, background="#F7F7F7",
             highlightthickness=0, cursor="crosshair",
         )
         canvas.pack(pady=(8, 12))
@@ -851,7 +869,7 @@ class WindowsDashboardApp:
                     channels = colorsys.hsv_to_rgb(pixel_hue, pixel_saturation, 1.0)
                     row.append("#%02X%02X%02X" % tuple(round(value * 255) for value in channels))
                 else:
-                    row.append("#F4F7FB")
+                    row.append("#F7F7F7")
             rows.append("{" + " ".join(row) + "}")
         wheel.put(" ".join(rows))
         canvas.create_image(0, 0, image=wheel, anchor=tk.NW)
