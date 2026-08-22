@@ -37,6 +37,11 @@ class WindowsDashboardApp:
         self._total_led_text = tk.StringVar(value="总灯数：6")
         self._status = tk.StringVar(value="连接中")
         self._preview_active = False
+        self._five_hour_tokens = tk.StringVar(value="0")
+        self._seven_day_tokens = tk.StringVar(value="0")
+        self._plan_balance = tk.StringVar(value="暂不可获取")
+        self._status_tree: ttk.Treeview | None = None
+        self._status_task_ids: dict[str, str] = {}
         self._style_colors: dict[TaskState, tuple[int, int, int]] = {}
         self._style_effects: dict[TaskState, tk.StringVar] = {}
         self._style_frequencies: dict[TaskState, tk.IntVar] = {}
@@ -66,6 +71,7 @@ class WindowsDashboardApp:
             lambda: max(1, self._total_led_count.get() - 1),
         )
         self._codex_data_source.start()
+        self.root.after(200, self._refresh_status_page)
         self.root.after(100, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -191,7 +197,36 @@ class WindowsDashboardApp:
             side=tk.RIGHT, padx=(0, 8)
         )
 
-        usage = ttk.LabelFrame(outer, text="第一颗灯 · 系统用量", padding=12)
+        notebook = ttk.Notebook(outer)
+        notebook.pack(fill=tk.BOTH, expand=True)
+        status_tab = ttk.Frame(notebook, padding=16)
+        settings_tab = ttk.Frame(notebook, padding=16)
+        notebook.add(status_tab, text="状态")
+        notebook.add(settings_tab, text="设置")
+
+        metrics = ttk.Frame(status_tab)
+        metrics.pack(fill=tk.X, pady=(0, 14))
+        for column, (title, value, detail) in enumerate((
+            ("计划余额", self._plan_balance, "官方暂无桌面套餐余量接口"),
+            ("五小时 Token", self._five_hour_tokens, "已采集事件的输入与输出合计"),
+            ("七天 Token", self._seven_day_tokens, "已采集事件的输入与输出合计"),
+        )):
+            card = ttk.LabelFrame(metrics, text=title, padding=12)
+            card.grid(row=0, column=column, sticky=tk.NSEW, padx=(0 if column == 0 else 8, 0))
+            ttk.Label(card, textvariable=value, font=("Microsoft YaHei UI", 17, "bold")).pack(anchor=tk.W)
+            ttk.Label(card, text=detail, foreground="#777777").pack(anchor=tk.W, pady=(5, 0))
+            metrics.columnconfigure(column, weight=1)
+
+        ttk.Label(status_tab, text="任务与灯位", font=("Microsoft YaHei UI", 12, "bold")).pack(anchor=tk.W)
+        ttk.Label(status_tab, text="双击任务可修改状态、进度和摘要；修改会写入本应用 SQLite。", foreground="#777777").pack(anchor=tk.W, pady=(3, 8))
+        self._status_tree = ttk.Treeview(status_tab, columns=("led", "task", "state", "progress", "summary", "source"), show="headings")
+        for key, title, width in (("led", "灯位", 65), ("task", "任务", 210), ("state", "状态", 90), ("progress", "进度", 70), ("summary", "摘要", 330), ("source", "来源", 90)):
+            self._status_tree.heading(key, text=title)
+            self._status_tree.column(key, width=width, anchor=tk.W)
+        self._status_tree.pack(fill=tk.BOTH, expand=True)
+        self._status_tree.bind("<Double-1>", self._edit_selected_status_task)
+
+        usage = ttk.LabelFrame(settings_tab, text="第一颗灯 · 系统用量", padding=12)
         usage.pack(fill=tk.X)
         self._add_scale(usage, "整体亮度", self._master_brightness, 0)
         ttk.Label(
@@ -208,7 +243,7 @@ class WindowsDashboardApp:
         )
         usage.columnconfigure(1, weight=1)
 
-        led_summary = ttk.LabelFrame(outer, text="灯带", padding=12)
+        led_summary = ttk.LabelFrame(settings_tab, text="灯带", padding=12)
         led_summary.pack(fill=tk.X, pady=(14, 0))
         ttk.Button(
             led_summary,
@@ -216,7 +251,7 @@ class WindowsDashboardApp:
             command=self._open_led_settings,
         ).pack(anchor=tk.W)
 
-        themes = ttk.LabelFrame(outer, text="状态颜色与行为（对所有任务灯生效）", padding=12)
+        themes = ttk.LabelFrame(settings_tab, text="状态颜色与行为（对所有任务灯生效）", padding=12)
         themes.pack(fill=tk.X, pady=14)
         defaults = {
             TaskState.RUNNING: ((0, 90, 255), "呼吸", 50, 15),
@@ -307,7 +342,7 @@ class WindowsDashboardApp:
             justify=tk.CENTER,
         ).pack(pady=(10, 0))
 
-        log_header = ttk.Frame(outer)
+        log_header = ttk.Frame(settings_tab)
         log_header.pack(fill=tk.X)
         ttk.Label(
             log_header,
@@ -316,7 +351,7 @@ class WindowsDashboardApp:
         ).pack(side=tk.LEFT)
         ttk.Button(log_header, text="一键清空", command=self._clear_log).pack(side=tk.RIGHT)
         self._log = tk.Text(
-            outer,
+            settings_tab,
             height=12,
             state=tk.DISABLED,
             font=("Cascadia Mono", 9),
@@ -682,6 +717,58 @@ class WindowsDashboardApp:
 
     def _post_codex_snapshot(self, snapshot: BridgeSnapshot) -> None:
         self._events.put(("codex_snapshot", snapshot))
+
+    def _refresh_status_page(self) -> None:
+        tree = self._status_tree
+        if tree is None or not tree.winfo_exists():
+            return
+        records = self._event_store.latest_records(max(1, self._total_led_count.get() - 1))
+        tree.delete(*tree.get_children())
+        self._status_task_ids.clear()
+        for index, record in enumerate(records):
+            iid = f"task_{index}"
+            self._status_task_ids[iid] = str(record["task_id"])
+            state = TaskState[record["state"].upper()].chinese_name
+            tree.insert("", tk.END, iid=iid, values=(index + 2, record["title"], state, f"{record['progress']}%", record["summary"], record["source"]))
+        five_hours, seven_days = self._event_store.usage_totals()
+        self._five_hour_tokens.set(f"{five_hours:,}")
+        self._seven_day_tokens.set(f"{seven_days:,}")
+
+    def _edit_selected_status_task(self, _event: object = None) -> None:
+        tree = self._status_tree
+        if tree is None or not tree.selection():
+            return
+        item_id = tree.selection()[0]
+        task_id = self._status_task_ids.get(item_id)
+        if not task_id:
+            return
+        values = tree.item(item_id, "values")
+        dialog = tk.Toplevel(self.root)
+        dialog.title("编辑任务状态")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        content = ttk.Frame(dialog, padding=18)
+        content.pack(fill=tk.BOTH, expand=True)
+        title = tk.StringVar(value=values[1])
+        state = tk.StringVar(value=values[2])
+        progress = tk.IntVar(value=int(str(values[3]).rstrip("%")))
+        summary = tk.StringVar(value=values[4])
+        for row, label in enumerate(("任务名称", "状态", "进度 %", "摘要")):
+            ttk.Label(content, text=label, width=10).grid(row=row, column=0, sticky=tk.W, pady=6)
+        ttk.Entry(content, textvariable=title, width=48).grid(row=0, column=1, sticky=tk.EW)
+        ttk.Combobox(content, textvariable=state, values=[item.chinese_name for item in TaskState], state="readonly").grid(row=1, column=1, sticky=tk.EW)
+        ttk.Spinbox(content, textvariable=progress, from_=0, to=100).grid(row=2, column=1, sticky=tk.W)
+        ttk.Entry(content, textvariable=summary).grid(row=3, column=1, sticky=tk.EW)
+        content.columnconfigure(1, weight=1)
+
+        def save() -> None:
+            state_value = next(item.name.lower() for item in TaskState if item.chinese_name == state.get())
+            self._event_store.record({"task_id": task_id, "title": title.get(), "state": state_value, "progress": progress.get(), "summary": summary.get(), "source": "manual"})
+            self._refresh_status_page()
+            dialog.destroy()
+
+        ttk.Button(content, text="保存修改", command=save, style="Primary.TButton").grid(row=4, column=1, sticky=tk.E, pady=(16, 0))
+        self._fit_dialog(dialog, 560, 350, 480, 320)
 
     def _open_calibration(self) -> None:
         """为当前绑定灯板调整通道增益和伽马，并按唯一 ID 保存。"""
@@ -1116,6 +1203,7 @@ class WindowsDashboardApp:
                 local_snapshot = event[1]
                 self._period_used.set(local_snapshot.busy_percent)
                 self._snapshot.tasks = local_snapshot.tasks
+                self._refresh_status_page()
                 if not self._preview_active and self._worker is not None and self._worker.is_connected:
                     self._send()
                 continue

@@ -62,12 +62,23 @@ class StatusEventStore:
                     state TEXT NOT NULL,
                     progress INTEGER NOT NULL DEFAULT 0,
                     source TEXT NOT NULL DEFAULT 'codex',
+                    summary TEXT NOT NULL DEFAULT '',
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
                     occurred_at_ms INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_events_task_time
                     ON task_events(task_id, occurred_at_ms DESC);
                 """
             )
+            columns = {row[1] for row in database.execute("PRAGMA table_info(task_events)")}
+            for name, definition in (
+                ("summary", "TEXT NOT NULL DEFAULT ''"),
+                ("input_tokens", "INTEGER NOT NULL DEFAULT 0"),
+                ("output_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in columns:
+                    database.execute(f"ALTER TABLE task_events ADD COLUMN {name} {definition}")
 
     def record(self, event: dict[str, Any]) -> None:
         state = str(event.get("state", "")).lower()
@@ -79,15 +90,45 @@ class StatusEventStore:
         title = str(event.get("title") or "Codex 任务").strip()[:240]
         progress = max(0, min(100, int(event.get("progress", 0))))
         source = str(event.get("source") or "codex").strip()[:80]
+        summary = str(event.get("summary") or "").strip()[:500]
+        input_tokens = max(0, int(event.get("input_tokens", 0) or 0))
+        output_tokens = max(0, int(event.get("output_tokens", 0) or 0))
         occurred_at_ms = int(event.get("occurred_at_ms") or time.time_ns() // 1_000_000)
         with self._connect() as database:
             database.execute(
                 """
-                INSERT INTO task_events(task_id, title, state, progress, source, occurred_at_ms)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO task_events(task_id, title, state, progress, source, summary, input_tokens, output_tokens, occurred_at_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (task_id, title, state, progress, source, occurred_at_ms),
+                (task_id, title, state, progress, source, summary, input_tokens, output_tokens, occurred_at_ms),
             )
+
+    def latest_records(self, limit: int = 63) -> list[dict[str, Any]]:
+        """返回每个任务的最新记录，供状态页展示和人工修正。"""
+        with self._connect() as database:
+            rows = database.execute(
+                """
+                WITH ranked AS (
+                    SELECT *, ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY occurred_at_ms DESC, id DESC) position
+                    FROM task_events
+                )
+                SELECT task_id,title,state,progress,source,summary,occurred_at_ms
+                FROM ranked WHERE position=1
+                ORDER BY occurred_at_ms DESC LIMIT ?
+                """, (max(1, min(63, limit)),)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def usage_totals(self) -> tuple[int, int]:
+        now_ms = time.time_ns() // 1_000_000
+        with self._connect() as database:
+            def total(hours: int) -> int:
+                row = database.execute(
+                    "SELECT COALESCE(SUM(input_tokens + output_tokens),0) FROM task_events WHERE occurred_at_ms>=?",
+                    (now_ms - hours * 60 * 60 * 1000,),
+                ).fetchone()
+                return int(row[0])
+            return total(5), total(24 * 7)
 
     def snapshot(self, task_limit: int) -> BridgeSnapshot:
         now_ms = time.time_ns() // 1_000_000
@@ -183,4 +224,3 @@ class EventIngestServer:
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
-
