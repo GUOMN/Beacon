@@ -1,0 +1,27 @@
+build/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+
+# ESP-IDF 与诊断工程构建输出
+diagnostic_idle/build/
+
+# Python 本地环境、缓存和打包中间文件
+desktop/.packaging-venv/
+desktop/.venv/
+desktop/**/__pycache__/
+desktop/build/
+desktop/dist/
+dist/
+*.pyc
+
+# Windows 可执行包由源码构建，不进入源码仓库
+*.exe
+*.zip
+
+# 编辑器和操作系统本地文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

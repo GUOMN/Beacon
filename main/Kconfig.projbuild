@@ -1,0 +1,15 @@
+menu "WS2812 流水灯配置"
+
+config WS2812_GPIO
+    int "WS2812 数据引脚 GPIO"
+    range 0 21
+    default 8
+    help
+        连接到第一颗 WS2812 灯珠 DIN 的 GPIO 引脚。
+
+config WS2812_FRAME_INTERVAL_MS
+    int "动画帧间隔（毫秒）"
+    range 5 100
+    default 20
+
+endmenu

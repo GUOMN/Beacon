@@ -1,0 +1,54 @@
+import unittest
+
+from codex_status_core.models import DashboardSnapshot, TaskSlot, TaskState
+from codex_status_core.protocol import BLEProtocol
+
+
+class BLEProtocolTests(unittest.TestCase):
+    def test_snapshot_is_exactly_sixteen_bytes(self) -> None:
+        snapshot = DashboardSnapshot(
+            master_brightness_percent=60,
+            remaining_percent=72,
+            period_used_percent=35,
+            tasks=[
+                TaskSlot("一", TaskState.RUNNING, 20),
+                TaskSlot("二", TaskState.WAITING, 50),
+                TaskSlot("三", TaskState.SUCCESS, 100),
+                TaskSlot("四", TaskState.FAILURE, 80),
+                TaskSlot("五", TaskState.IDLE, 0),
+            ],
+        )
+        packet = BLEProtocol.encode_snapshot(9, snapshot)
+        self.assertEqual(len(packet), 17)
+        self.assertEqual(packet[:6], bytes((0xC3, 1, 2, 9, 72, 35)))
+        self.assertEqual(packet[6:11], bytes((1, 2, 3, 5, 0)))
+        self.assertEqual(packet[11:16], bytes((20, 50, 100, 80, 0)))
+        self.assertEqual(packet[16], 60)
+
+    def test_heartbeat_layout(self) -> None:
+        self.assertEqual(BLEProtocol.encode_heartbeat(257), bytes((0xC3, 1, 1, 1)))
+
+    def test_device_name_contains_stable_short_id(self) -> None:
+        self.assertEqual(BLEProtocol.device_id_from_name("Codex-Light-A1B2C3"), "A1B2C3")
+        self.assertIsNone(BLEProtocol.device_id_from_name("Codex-Status-6"))
+
+    def test_identify_layout(self) -> None:
+        self.assertEqual(BLEProtocol.encode_identify(258), bytes((0xC3, 1, 4, 2)))
+
+    def test_scalable_task_packets(self) -> None:
+        snapshot = DashboardSnapshot(tasks=[TaskSlot("任务")])
+        self.assertEqual(len(BLEProtocol.encode_panel_header(1, snapshot)), 7)
+        self.assertEqual(
+            BLEProtocol.encode_task_state(2, 0, snapshot.tasks[0]),
+            bytes((0xC3, 1, 6, 2, 0, 0, 0)),
+        )
+
+    def test_state_style_packet(self) -> None:
+        self.assertEqual(
+            BLEProtocol.encode_state_style(3, 1, (10, 20, 30), 3, 1500, 20),
+            bytes((0xC3, 1, 5, 3, 1, 10, 20, 30, 3, 0xDC, 0x05, 20)),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
