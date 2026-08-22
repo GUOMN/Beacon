@@ -44,7 +44,9 @@ class WindowsDashboardApp:
         self._status_task_ids: dict[str, str] = {}
         self._status_records: dict[str, dict[str, object]] = {}
         self._lamp_color_images: dict[tuple[int, int, int], tk.PhotoImage] = {}
+        self._checked_task_ids: set[str] = set()
         self._drag_task_item: str | None = None
+        self._drag_task_moved = False
         self._style_colors: dict[TaskState, tuple[int, int, int]] = {}
         self._style_effects: dict[TaskState, tk.StringVar] = {}
         self._style_frequencies: dict[TaskState, tk.IntVar] = {}
@@ -124,6 +126,15 @@ class WindowsDashboardApp:
             font=("Microsoft YaHei UI", 11, "bold"),
             padding=(20, 11),
         )
+        style.configure(
+            "Apply.TButton",
+            background="#2563EB",
+            foreground="#FFFFFF",
+            font=("Microsoft YaHei UI", 11, "bold"),
+            padding=(24, 10),
+            borderwidth=1,
+        )
+        style.map("Apply.TButton", background=[("active", "#1D4ED8"), ("pressed", "#1E40AF")])
         style.map(
             "Primary.TButton",
             background=[("active", "#343434"), ("pressed", "#111111")],
@@ -226,10 +237,10 @@ class WindowsDashboardApp:
         ttk.Button(task_actions, text="删除选中任务", command=self._delete_selected_tasks, style="Danger.TButton").pack(side=tk.RIGHT)
         ttk.Button(task_actions, text="删除已完成任务", command=self._delete_completed_tasks, style="Danger.TButton").pack(side=tk.RIGHT, padx=(0, 8))
         ttk.Label(task_actions, text="第一个灯是系统状态灯，从第二个灯开始计数，灯位为 1；双击可编辑，拖动可调整灯位。", foreground="#777777").pack(side=tk.LEFT)
-        self._status_tree = ttk.Treeview(status_tab, columns=("effect", "task", "state", "summary", "source"), show="tree headings", selectmode="extended")
-        self._status_tree.heading("#0", text="灯位")
-        self._status_tree.column("#0", width=90, anchor=tk.W)
-        for key, title, width in (("effect", "当前灯效", 115), ("task", "任务", 210), ("state", "任务状态", 90), ("summary", "摘要", 340), ("source", "来源", 80)):
+        self._status_tree = ttk.Treeview(status_tab, columns=("led", "effect", "task", "state", "summary", "source"), show="tree headings", selectmode="none")
+        self._status_tree.heading("#0", text="选择 / 排序")
+        self._status_tree.column("#0", width=115, anchor=tk.W)
+        for key, title, width in (("led", "灯位", 60), ("effect", "当前灯效", 105), ("task", "任务", 190), ("state", "任务状态", 85), ("summary", "摘要", 300), ("source", "来源", 75)):
             self._status_tree.heading(key, text=title)
             self._status_tree.column(key, width=width, anchor=tk.W)
         self._status_tree.pack(fill=tk.BOTH, expand=True)
@@ -244,7 +255,6 @@ class WindowsDashboardApp:
         header_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(header_text, text="灯板设置", font=("Microsoft YaHei UI", 14, "bold")).pack(anchor=tk.W)
         ttk.Label(header_text, text="统一配置灯珠数量、系统灯以及所有任务状态的颜色和动画。", foreground="#777777").pack(anchor=tk.W, pady=(3, 0))
-        ttk.Button(settings_header, text="保存并生效", command=self._send, style="Primary.TButton").pack(side=tk.RIGHT)
 
         usage = ttk.LabelFrame(settings_tab, text="第一颗灯 · 系统用量", padding=12)
         usage.pack(fill=tk.X)
@@ -360,8 +370,10 @@ class WindowsDashboardApp:
             log_header,
             text="连接日志",
             font=("Microsoft YaHei UI", 10, "bold"),
-        ).pack(side=tk.LEFT)
-        ttk.Button(log_header, text="一键清空", command=self._clear_log).pack(side=tk.RIGHT)
+        ).grid(row=0, column=0, sticky=tk.W)
+        ttk.Button(log_header, text="保存并生效", command=self._send, style="Apply.TButton").grid(row=0, column=1)
+        ttk.Button(log_header, text="一键清空", command=self._clear_log).grid(row=0, column=2, sticky=tk.E)
+        log_header.columnconfigure(1, weight=1)
         self._log = tk.Text(
             settings_tab,
             height=12,
@@ -754,24 +766,31 @@ class WindowsDashboardApp:
                 image = tk.PhotoImage(width=14, height=14)
                 image.put(self._hex_color(color), to=(0, 0, 14, 14))
                 self._lamp_color_images[color] = image
-            tree.insert("", tk.END, iid=iid, text=str(led_position), image=image, values=(lamp_effect, record["title"], state, record["summary"], record["source"]))
+            checked = "☑" if str(record["task_id"]) in self._checked_task_ids else "☐"
+            tree.insert("", tk.END, iid=iid, text=f"{checked}     ⠿", image=image, values=(led_position, lamp_effect, record["title"], state, record["summary"], record["source"]))
 
     def _begin_task_drag(self, event: tk.Event) -> str | None:
         tree = self._status_tree
         if tree is None:
             return None
         row = tree.identify_row(event.y)
-        self._drag_task_item = row or None
+        self._drag_task_item = None
+        self._drag_task_moved = False
         if not row:
             return None
-        # 自行处理选择，避免拖拽绑定抢占 Treeview 的默认选中状态。
-        if event.state & 0x0004:  # Ctrl：增删多选项
-            if row in tree.selection():
-                tree.selection_remove(row)
+        if tree.identify_column(event.x) != "#0":
+            return None
+        bounds = tree.bbox(row, "#0")
+        relative_x = event.x - bounds[0] if bounds else 0
+        task_id = self._status_task_ids.get(row)
+        if relative_x < 62 and task_id:
+            if task_id in self._checked_task_ids:
+                self._checked_task_ids.remove(task_id)
             else:
-                tree.selection_add(row)
-        elif row not in tree.selection():
-            tree.selection_set(row)
+                self._checked_task_ids.add(task_id)
+            self._refresh_status_page()
+            return "break"
+        self._drag_task_item = row
         tree.focus(row)
         return "break"
 
@@ -784,12 +803,15 @@ class WindowsDashboardApp:
         if target and target != source:
             children = list(tree.get_children())
             tree.move(source, "", children.index(target))
+            self._drag_task_moved = True
 
     def _finish_task_drag(self, event: tk.Event) -> None:
         tree = self._status_tree
         source = self._drag_task_item
         self._drag_task_item = None
         if tree is None or not source:
+            return
+        if not self._drag_task_moved:
             return
         ordered_ids = [self._status_task_ids[item] for item in tree.get_children() if item in self._status_task_ids]
         self._event_store.reorder_tasks(ordered_ids)
@@ -800,12 +822,13 @@ class WindowsDashboardApp:
         tree = self._status_tree
         if tree is None:
             return
-        task_ids = [self._status_task_ids[item] for item in tree.selection() if item in self._status_task_ids]
+        task_ids = list(self._checked_task_ids)
         if not task_ids:
             return
         if not messagebox.askyesno("永久删除任务", f"将永久删除选中的 {len(task_ids)} 个任务及全部历史记录，无法恢复。是否继续？", parent=self.root):
             return
         self._event_store.delete_tasks(task_ids)
+        self._checked_task_ids.difference_update(task_ids)
         self._refresh_status_page()
         self._post_status(f"已永久删除 {len(task_ids)} 个任务")
 
@@ -821,11 +844,13 @@ class WindowsDashboardApp:
         self._refresh_status_page()
         self._post_status(f"已永久删除 {len(task_ids)} 个已完成任务")
 
-    def _edit_selected_status_task(self, _event: object = None) -> None:
+    def _edit_selected_status_task(self, event: object = None) -> None:
         tree = self._status_tree
-        if tree is None or not tree.selection():
+        if tree is None:
             return
-        item_id = tree.selection()[0]
+        item_id = tree.identify_row(event.y) if isinstance(event, tk.Event) else tree.focus()
+        if not item_id:
+            return
         task_id = self._status_task_ids.get(item_id)
         if not task_id:
             return
