@@ -18,6 +18,7 @@ from codex_status_core.models import DashboardSnapshot, StateStyle, TaskSlot, Ta
 from windows_app.ble_worker import BLEWorker, identify_status_device, scan_status_devices
 from codex_status_core.event_data_source import EventDataSource
 from codex_status_core.event_store import BridgeSnapshot, EventIngestServer, StatusEventStore
+from codex_status_core.codex_session_source import CodexSessionSource
 from codex_status_core.hook_adapter import report_codex_notification, report_hook
 from codex_status_core.hook_manager import install as install_hook, providers as hook_providers, status as hook_status, uninstall as uninstall_hook
 
@@ -69,6 +70,8 @@ class WindowsDashboardApp:
         self._event_store = StatusEventStore()
         self._event_server = EventIngestServer(self._event_store)
         self._event_server.start()
+        self._codex_session_source = CodexSessionSource(self._event_store, self._post_status)
+        self._codex_session_source.start()
         self._codex_data_source = EventDataSource(
             self._event_store,
             self._post_codex_snapshot,
@@ -1355,6 +1358,7 @@ class WindowsDashboardApp:
         self.root.after(100, self._drain_events)
 
     def _on_close(self) -> None:
+        self._codex_session_source.stop()
         self._codex_data_source.stop()
         self._event_server.stop()
         if self._worker is not None:

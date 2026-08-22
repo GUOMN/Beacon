@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codex_status_core.event_store import StatusEventStore
+from codex_status_core.codex_session_source import CodexSessionSource
 from codex_status_core.hook_manager import HookProvider, install, status, uninstall
 
 
@@ -57,6 +58,19 @@ class EventPipelineTests(unittest.TestCase):
             store.delete_tasks(["one"])
             self.assertEqual([item.title for item in store.snapshot(2).tasks], ["three", "two"])
             self.assertNotIn("one", [item["task_id"] for item in store.latest_records()])
+
+    def test_codex_live_events_map_to_task_states_and_summary(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            store = StatusEventStore(Path(folder) / "events.sqlite")
+            source = CodexSessionSource(store, lambda _message: None)
+            source._titles["thread"] = "灯板任务"
+            source._consume("thread", {"type": "event_msg", "payload": {"type": "user_message", "message": "实现 蓝牙 状态灯"}})
+            source._consume("thread", {"type": "event_msg", "payload": {"type": "task_started"}})
+            record = store.latest_records()[0]
+            self.assertEqual(record["state"], "running")
+            self.assertEqual(record["summary"], "实现 蓝牙 状态灯")
+            source._consume("thread", {"type": "event_msg", "payload": {"type": "task_complete"}})
+            self.assertEqual(store.latest_records()[0]["state"], "success")
 
 
 if __name__ == "__main__":

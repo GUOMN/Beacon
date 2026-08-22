@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import glob
+import json
+import os
+import re
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+from .event_store import StatusEventStore
+
+
+THREAD_ID_PATTERN = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+
+
+class CodexSessionSource:
+    """只读跟踪 Codex 会话事件流，不写入 Codex 文件。"""
+
+    def __init__(self, store: StatusEventStore, status_callback: Callable[[str], None]) -> None:
+        self._store = store
+        self._status_callback = status_callback
+        self._root = Path.home() / ".codex"
+        self._offsets: dict[Path, int] = {}
+        self._titles: dict[str, str] = {}
+        self._summaries: dict[str, str] = {}
+        self._waiting_calls: dict[str, set[str]] = {}
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._load_titles()
+        now = time.time()
+        for path in self._session_files():
+            # 最近会话回读尾部，应用重启后仍可恢复正在执行的任务；旧会话从末尾开始。
+            self._offsets[path] = 0 if now - path.stat().st_mtime < 300 else path.stat().st_size
+        self.poll_once()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.wait(0.5):
+            try:
+                self.poll_once()
+            except Exception:
+                continue
+
+    def _session_files(self) -> list[Path]:
+        return [Path(value) for value in glob.glob(str(self._root / "sessions" / "**" / "*.jsonl"), recursive=True)]
+
+    def _load_titles(self) -> None:
+        path = self._root / "session_index.jsonl"
+        if not path.exists():
+            return
+        try:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                item = json.loads(line)
+                if item.get("id") and item.get("thread_name"):
+                    self._titles[str(item["id"])] = str(item["thread_name"]).strip()[:120]
+        except Exception:
+            pass
+
+    @staticmethod
+    def _thread_id(path: Path) -> str:
+        matches = THREAD_ID_PATTERN.findall(path.stem)
+        return matches[-1] if matches else path.stem
+
+    def poll_once(self) -> None:
+        self._load_titles()
+        for path in self._session_files():
+            offset = self._offsets.get(path, path.stat().st_size)
+            size = path.stat().st_size
+            if size < offset:
+                offset = 0
+            if size == offset:
+                self._offsets[path] = offset
+                continue
+            with path.open("rb") as stream:
+                stream.seek(offset)
+                for line in stream:
+                    try:
+                        self._consume(self._thread_id(path), json.loads(line))
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        continue
+                self._offsets[path] = stream.tell()
+
+    def _consume(self, thread_id: str, envelope: dict[str, Any]) -> None:
+        payload = envelope.get("payload") or {}
+        envelope_type = envelope.get("type")
+        event_type = payload.get("type")
+        task_id = f"codex:{thread_id}"
+        title = self._titles.get(thread_id, "Codex 任务")
+
+        if envelope_type == "event_msg" and event_type == "user_message":
+            message = " ".join(str(payload.get("message") or "").split())
+            if message:
+                self._summaries[thread_id] = message[:240]
+            return
+        state: str | None = None
+        if envelope_type == "event_msg" and event_type == "task_started":
+            state = "running"
+        elif envelope_type == "event_msg" and event_type == "task_complete":
+            state = "success"
+        elif envelope_type == "event_msg" and event_type == "turn_aborted":
+            state = "warning"
+        elif envelope_type == "response_item" and event_type == "custom_tool_call":
+            call_id = str(payload.get("call_id") or payload.get("id") or "")
+            try:
+                arguments = json.loads(payload.get("input") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                arguments = {}
+            if arguments.get("sandbox_permissions") == "require_escalated" or arguments.get("require_approval") is True:
+                self._waiting_calls.setdefault(thread_id, set()).add(call_id)
+                state = "waiting"
+        elif envelope_type == "response_item" and event_type in {"custom_tool_call_output", "function_call_output"}:
+            call_id = str(payload.get("call_id") or "")
+            waiting = self._waiting_calls.setdefault(thread_id, set())
+            if call_id in waiting:
+                waiting.discard(call_id)
+                state = "running"
+        if state is None:
+            return
+        self._store.record({
+            "task_id": task_id,
+            "title": title,
+            "summary": self._summaries.get(thread_id, title),
+            "state": state,
+            "progress": 100 if state == "success" else 0,
+            "source": "codex-live",
+        })
