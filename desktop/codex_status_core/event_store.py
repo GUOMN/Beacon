@@ -140,12 +140,11 @@ class StatusEventStore:
                     (task_id, order),
                 )
 
-    def hide_tasks(self, task_ids: list[str]) -> None:
+    def delete_tasks(self, task_ids: list[str]) -> None:
+        """物理删除任务及全部历史事件；调用方应明确提示不可恢复。"""
         with self._connect() as database:
-            database.executemany(
-                "UPDATE task_layout SET hidden=1 WHERE task_id=?",
-                [(task_id,) for task_id in task_ids],
-            )
+            database.executemany("DELETE FROM task_events WHERE task_id=?", [(task_id,) for task_id in task_ids])
+            database.executemany("DELETE FROM task_layout WHERE task_id=?", [(task_id,) for task_id in task_ids])
 
     def usage_totals(self) -> tuple[int, int]:
         now_ms = time.time_ns() // 1_000_000

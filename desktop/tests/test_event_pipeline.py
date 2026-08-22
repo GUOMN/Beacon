@@ -54,8 +54,9 @@ class EventPipelineTests(unittest.TestCase):
                 store.record({"task_id": task_id, "title": task_id, "state": "running"})
             store.reorder_tasks(["three", "one", "two"])
             self.assertEqual([item["task_id"] for item in store.latest_records()], ["three", "one", "two"])
-            store.hide_tasks(["one"])
+            store.delete_tasks(["one"])
             self.assertEqual([item.title for item in store.snapshot(2).tasks], ["three", "two"])
+            self.assertNotIn("one", [item["task_id"] for item in store.latest_records()])
 
 
 if __name__ == "__main__":

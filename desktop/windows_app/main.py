@@ -12,7 +12,7 @@ import sys
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 from codex_status_core.models import DashboardSnapshot, StateStyle, TaskSlot, TaskState
 from windows_app.ble_worker import BLEWorker, identify_status_device, scan_status_devices
@@ -37,11 +37,12 @@ class WindowsDashboardApp:
         self._total_led_text = tk.StringVar(value="总灯数：6")
         self._status = tk.StringVar(value="连接中")
         self._preview_active = False
-        self._five_hour_tokens = tk.StringVar(value="0")
-        self._seven_day_tokens = tk.StringVar(value="0")
+        self._five_hour_tokens = tk.StringVar(value="等待数据源")
+        self._seven_day_tokens = tk.StringVar(value="等待数据源")
         self._plan_balance = tk.StringVar(value="暂不可获取")
         self._status_tree: ttk.Treeview | None = None
         self._status_task_ids: dict[str, str] = {}
+        self._status_records: dict[str, dict[str, object]] = {}
         self._drag_task_item: str | None = None
         self._style_colors: dict[TaskState, tuple[int, int, int]] = {}
         self._style_effects: dict[TaskState, tk.StringVar] = {}
@@ -209,8 +210,8 @@ class WindowsDashboardApp:
         metrics.pack(fill=tk.X, pady=(0, 14))
         for column, (title, value, detail) in enumerate((
             ("计划余额", self._plan_balance, "官方暂无桌面套餐余量接口"),
-            ("五小时 Token", self._five_hour_tokens, "已采集事件的输入与输出合计"),
-            ("七天 Token", self._seven_day_tokens, "已采集事件的输入与输出合计"),
+            ("五小时 Token", self._five_hour_tokens, "等待独立用量数据源"),
+            ("七天 Token", self._seven_day_tokens, "等待独立用量数据源"),
         )):
             card = ttk.LabelFrame(metrics, text=title, padding=12)
             card.grid(row=0, column=column, sticky=tk.NSEW, padx=(0 if column == 0 else 8, 0))
@@ -222,15 +223,17 @@ class WindowsDashboardApp:
         ttk.Label(status_tab, text="双击任务可修改状态、进度和摘要；修改会写入本应用 SQLite。", foreground="#777777").pack(anchor=tk.W, pady=(3, 8))
         task_actions = ttk.Frame(status_tab)
         task_actions.pack(fill=tk.X, pady=(0, 8))
-        ttk.Button(task_actions, text="清理选中任务", command=self._hide_selected_tasks, style="Danger.TButton").pack(side=tk.RIGHT)
+        ttk.Button(task_actions, text="删除选中任务", command=self._delete_selected_tasks, style="Danger.TButton").pack(side=tk.RIGHT)
+        ttk.Button(task_actions, text="删除已完成任务", command=self._delete_completed_tasks, style="Danger.TButton").pack(side=tk.RIGHT, padx=(0, 8))
         ttk.Label(task_actions, text="系统灯固定为 0；拖动任务行可调整灯位。", foreground="#777777").pack(side=tk.LEFT)
-        self._status_tree = ttk.Treeview(status_tab, columns=("led", "task", "state", "progress", "summary", "source"), show="headings", selectmode="extended")
-        for key, title, width in (("led", "灯位", 65), ("task", "任务", 210), ("state", "状态", 90), ("progress", "进度", 70), ("summary", "摘要", 330), ("source", "来源", 90)):
+        self._status_tree = ttk.Treeview(status_tab, columns=("led", "effect", "task", "state", "summary", "source"), show="headings", selectmode="extended")
+        for key, title, width in (("led", "灯位", 65), ("effect", "当前灯效", 155), ("task", "任务", 210), ("state", "任务状态", 90), ("summary", "摘要", 320), ("source", "来源", 80)):
             self._status_tree.heading(key, text=title)
             self._status_tree.column(key, width=width, anchor=tk.W)
         self._status_tree.pack(fill=tk.BOTH, expand=True)
         self._status_tree.bind("<Double-1>", self._edit_selected_status_task)
         self._status_tree.bind("<ButtonPress-1>", self._begin_task_drag, add="+")
+        self._status_tree.bind("<B1-Motion>", self._move_task_drag, add="+")
         self._status_tree.bind("<ButtonRelease-1>", self._finish_task_drag, add="+")
 
         usage = ttk.LabelFrame(settings_tab, text="第一颗灯 · 系统用量", padding=12)
@@ -732,20 +735,33 @@ class WindowsDashboardApp:
         records = self._event_store.latest_records(500)
         tree.delete(*tree.get_children())
         self._status_task_ids.clear()
+        self._status_records.clear()
         for index, record in enumerate(records):
             iid = f"task_{index}"
             self._status_task_ids[iid] = str(record["task_id"])
+            self._status_records[iid] = record
             state = TaskState[record["state"].upper()].chinese_name
+            state_enum = TaskState[record["state"].upper()]
+            color = self._style_colors.get(state_enum, (0, 0, 0))
+            effect = self._style_effects[state_enum].get() if state_enum in self._style_effects else "熄灭"
+            lamp_effect = f"{self._hex_color(color)} · {effect}"
             task_capacity = max(1, self._total_led_count.get() - 1)
             led_position: object = index + 1 if index < task_capacity else "未分配"
-            tree.insert("", tk.END, iid=iid, values=(led_position, record["title"], state, f"{record['progress']}%", record["summary"], record["source"]))
-        five_hours, seven_days = self._event_store.usage_totals()
-        self._five_hour_tokens.set(f"{five_hours:,}")
-        self._seven_day_tokens.set(f"{seven_days:,}")
+            tree.insert("", tk.END, iid=iid, values=(led_position, lamp_effect, record["title"], state, record["summary"], record["source"]))
 
     def _begin_task_drag(self, event: tk.Event) -> None:
         if self._status_tree is not None:
             self._drag_task_item = self._status_tree.identify_row(event.y) or None
+
+    def _move_task_drag(self, event: tk.Event) -> None:
+        tree = self._status_tree
+        source = self._drag_task_item
+        if tree is None or not source:
+            return
+        target = tree.identify_row(event.y)
+        if target and target != source:
+            children = list(tree.get_children())
+            tree.move(source, "", children.index(target))
 
     def _finish_task_drag(self, event: tk.Event) -> None:
         tree = self._status_tree
@@ -753,26 +769,35 @@ class WindowsDashboardApp:
         self._drag_task_item = None
         if tree is None or not source:
             return
-        target = tree.identify_row(event.y)
-        if not target or target == source:
-            return
-        children = list(tree.get_children())
-        tree.move(source, "", children.index(target))
         ordered_ids = [self._status_task_ids[item] for item in tree.get_children() if item in self._status_task_ids]
         self._event_store.reorder_tasks(ordered_ids)
         self._refresh_status_page()
         self._post_status("任务灯位顺序已保存")
 
-    def _hide_selected_tasks(self) -> None:
+    def _delete_selected_tasks(self) -> None:
         tree = self._status_tree
         if tree is None:
             return
         task_ids = [self._status_task_ids[item] for item in tree.selection() if item in self._status_task_ids]
         if not task_ids:
             return
-        self._event_store.hide_tasks(task_ids)
+        if not messagebox.askyesno("永久删除任务", f"将从 SQLite 永久删除选中的 {len(task_ids)} 个任务及全部历史事件，无法恢复。是否继续？", parent=self.root):
+            return
+        self._event_store.delete_tasks(task_ids)
         self._refresh_status_page()
-        self._post_status(f"已从当前视图清理 {len(task_ids)} 个任务")
+        self._post_status(f"已从 SQLite 永久删除 {len(task_ids)} 个任务")
+
+    def _delete_completed_tasks(self) -> None:
+        records = self._event_store.latest_records(1000)
+        task_ids = [str(record["task_id"]) for record in records if record["state"] == "success"]
+        if not task_ids:
+            self._post_status("当前没有已完成任务可删除")
+            return
+        if not messagebox.askyesno("删除已完成任务", f"将从 SQLite 永久删除 {len(task_ids)} 个已完成任务及全部历史事件，无法恢复。是否继续？", parent=self.root):
+            return
+        self._event_store.delete_tasks(task_ids)
+        self._refresh_status_page()
+        self._post_status(f"已永久删除 {len(task_ids)} 个已完成任务")
 
     def _edit_selected_status_task(self, _event: object = None) -> None:
         tree = self._status_tree
@@ -789,25 +814,24 @@ class WindowsDashboardApp:
         dialog.grab_set()
         content = ttk.Frame(dialog, padding=18)
         content.pack(fill=tk.BOTH, expand=True)
-        title = tk.StringVar(value=values[1])
-        state = tk.StringVar(value=values[2])
-        progress = tk.IntVar(value=int(str(values[3]).rstrip("%")))
+        title = tk.StringVar(value=values[2])
+        state = tk.StringVar(value=values[3])
         summary = tk.StringVar(value=values[4])
-        for row, label in enumerate(("任务名称", "状态", "进度 %", "摘要")):
+        for row, label in enumerate(("任务名称", "状态", "摘要")):
             ttk.Label(content, text=label, width=10).grid(row=row, column=0, sticky=tk.W, pady=6)
         ttk.Entry(content, textvariable=title, width=48).grid(row=0, column=1, sticky=tk.EW)
         ttk.Combobox(content, textvariable=state, values=[item.chinese_name for item in TaskState], state="readonly").grid(row=1, column=1, sticky=tk.EW)
-        ttk.Spinbox(content, textvariable=progress, from_=0, to=100).grid(row=2, column=1, sticky=tk.W)
-        ttk.Entry(content, textvariable=summary).grid(row=3, column=1, sticky=tk.EW)
+        ttk.Entry(content, textvariable=summary).grid(row=2, column=1, sticky=tk.EW)
         content.columnconfigure(1, weight=1)
 
         def save() -> None:
             state_value = next(item.name.lower() for item in TaskState if item.chinese_name == state.get())
-            self._event_store.record({"task_id": task_id, "title": title.get(), "state": state_value, "progress": progress.get(), "summary": summary.get(), "source": "manual"})
+            previous = self._status_records.get(item_id, {})
+            self._event_store.record({"task_id": task_id, "title": title.get(), "state": state_value, "progress": previous.get("progress", 0), "summary": summary.get(), "source": "manual"})
             self._refresh_status_page()
             dialog.destroy()
 
-        ttk.Button(content, text="保存修改", command=save, style="Primary.TButton").grid(row=4, column=1, sticky=tk.E, pady=(16, 0))
+        ttk.Button(content, text="保存修改", command=save, style="Primary.TButton").grid(row=3, column=1, sticky=tk.E, pady=(16, 0))
         self._fit_dialog(dialog, 560, 350, 480, 320)
 
     def _open_calibration(self) -> None:
