@@ -144,7 +144,14 @@ class WindowsDashboardApp:
             command=self._open_debug_preview,
         ).grid(row=0, column=8, padx=(24, 0), sticky=tk.N)
 
-        ttk.Label(outer, text="连接日志", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor=tk.W)
+        log_header = ttk.Frame(outer)
+        log_header.pack(fill=tk.X)
+        ttk.Label(
+            log_header,
+            text="连接日志",
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(side=tk.LEFT)
+        ttk.Button(log_header, text="一键清空", command=self._clear_log).pack(side=tk.RIGHT)
         self._log = tk.Text(outer, height=12, state=tk.DISABLED, font=("Consolas", 9))
         self._log.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
 
@@ -314,6 +321,12 @@ class WindowsDashboardApp:
 
     def _post_status(self, message: str) -> None:
         self._events.put(message)
+
+    def _clear_log(self) -> None:
+        """只清空界面日志，不改变蓝牙连接和灯板配置。"""
+        self._log.configure(state=tk.NORMAL)
+        self._log.delete("1.0", tk.END)
+        self._log.configure(state=tk.DISABLED)
 
     def _drain_events(self) -> None:
         while not self._events.empty():
