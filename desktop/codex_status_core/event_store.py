@@ -72,7 +72,8 @@ class StatusEventStore:
                 CREATE TABLE IF NOT EXISTS task_layout (
                     task_id TEXT PRIMARY KEY,
                     display_order INTEGER NOT NULL,
-                    hidden INTEGER NOT NULL DEFAULT 0
+                    hidden INTEGER NOT NULL DEFAULT 0,
+                    pinned INTEGER NOT NULL DEFAULT 0
                 );
                 """
             )
@@ -84,6 +85,9 @@ class StatusEventStore:
             ):
                 if name not in columns:
                     database.execute(f"ALTER TABLE task_events ADD COLUMN {name} {definition}")
+            layout_columns = {row[1] for row in database.execute("PRAGMA table_info(task_layout)")}
+            if "pinned" not in layout_columns:
+                database.execute("ALTER TABLE task_layout ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
 
     def record(self, event: dict[str, Any]) -> None:
         state = str(event.get("state", "")).lower()
@@ -92,14 +96,20 @@ class StatusEventStore:
         task_id = str(event.get("task_id", "")).strip()[:160]
         if not task_id:
             raise ValueError("task_id is required")
-        title = str(event.get("title") or "Codex 任务").strip()[:240]
+        title_value = event.get("title") if "title" in event else None
         progress = max(0, min(100, int(event.get("progress", 0))))
         source = str(event.get("source") or "codex").strip()[:80]
-        summary = str(event.get("summary") or "").strip()[:500]
+        summary_value = event.get("summary") if "summary" in event else None
         input_tokens = max(0, int(event.get("input_tokens", 0) or 0))
         output_tokens = max(0, int(event.get("output_tokens", 0) or 0))
         occurred_at_ms = int(event.get("occurred_at_ms") or time.time_ns() // 1_000_000)
         with self._connect() as database:
+            previous = database.execute(
+                "SELECT title,summary FROM task_events WHERE task_id=? ORDER BY occurred_at_ms DESC,id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            title = str(title_value if title_value is not None else (previous["title"] if previous else "Agent 任务")).strip()[:240]
+            summary = str(summary_value if summary_value is not None else (previous["summary"] if previous else "")).strip()[:500]
             database.execute(
                 """INSERT OR IGNORE INTO task_layout(task_id, display_order, hidden)
                    VALUES (?, COALESCE((SELECT MAX(display_order) + 1 FROM task_layout), 0), 0)""",
@@ -122,14 +132,36 @@ class StatusEventStore:
                     SELECT *, ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY occurred_at_ms DESC, id DESC) position
                     FROM task_events
                 )
-                SELECT ranked.task_id,title,state,progress,source,summary,occurred_at_ms
+                SELECT ranked.task_id,title,state,progress,source,summary,occurred_at_ms,
+                       COALESCE(layout.display_order,2147483647) display_order,
+                       COALESCE(layout.pinned,0) pinned,
+                       (SELECT MIN(first_event.occurred_at_ms) FROM task_events first_event WHERE first_event.task_id=ranked.task_id) first_at
                 FROM ranked
                 LEFT JOIN task_layout layout ON layout.task_id=ranked.task_id
                 WHERE position=1 AND COALESCE(layout.hidden,0)=0
-                ORDER BY COALESCE(layout.display_order, 2147483647), occurred_at_ms DESC LIMIT ?
-                """, (max(1, min(1000, limit)),)
+                LIMIT 1000
+                """
             ).fetchall()
-        return [dict(row) for row in rows]
+        records = [dict(row) for row in rows]
+        active_states = {"running", "waiting", "failure", "warning"}
+        pinned = sorted((item for item in records if item["pinned"]), key=lambda item: item["display_order"])
+        others = sorted(
+            (item for item in records if not item["pinned"]),
+            key=lambda item: (
+                0 if item["state"] in active_states else 1,
+                item["first_at"] if item["state"] in active_states else -item["occurred_at_ms"],
+            ),
+        )
+        ordered: list[dict[str, Any] | None] = [None] * len(records)
+        overflow: list[dict[str, Any]] = []
+        for item in pinned:
+            position = max(0, min(len(ordered) - 1, int(item["display_order"])))
+            if ordered[position] is None:
+                ordered[position] = item
+            else:
+                overflow.append(item)
+        fill = iter([*others, *overflow])
+        return [next(fill) if item is None else item for item in ordered][:max(1, min(1000, limit))]
 
     def reorder_tasks(self, task_ids: list[str]) -> None:
         with self._connect() as database:
@@ -139,6 +171,15 @@ class StatusEventStore:
                        ON CONFLICT(task_id) DO UPDATE SET display_order=excluded.display_order""",
                     (task_id, order),
                 )
+
+    def set_pinned(self, task_id: str, pinned: bool) -> None:
+        with self._connect() as database:
+            database.execute(
+                """INSERT INTO task_layout(task_id,display_order,hidden,pinned)
+                   VALUES (?,COALESCE((SELECT MAX(display_order)+1 FROM task_layout),0),0,?)
+                   ON CONFLICT(task_id) DO UPDATE SET pinned=excluded.pinned""",
+                (task_id, 1 if pinned else 0),
+            )
 
     def delete_tasks(self, task_ids: list[str]) -> None:
         """物理删除任务及全部历史事件；调用方应明确提示不可恢复。"""
@@ -160,24 +201,8 @@ class StatusEventStore:
     def snapshot(self, task_limit: int) -> BridgeSnapshot:
         now_ms = time.time_ns() // 1_000_000
         window_start = now_ms - 5 * 60 * 60 * 1000
+        latest = self.latest_records(max(1, min(63, task_limit)))
         with self._connect() as database:
-            latest = database.execute(
-                """
-                WITH ranked AS (
-                    SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY task_id ORDER BY occurred_at_ms DESC, id DESC
-                    ) AS position
-                    FROM task_events
-                )
-                SELECT ranked.task_id, title, state, progress, occurred_at_ms
-                FROM ranked
-                LEFT JOIN task_layout layout ON layout.task_id=ranked.task_id
-                WHERE position = 1 AND COALESCE(layout.hidden,0)=0
-                ORDER BY COALESCE(layout.display_order,2147483647), occurred_at_ms DESC
-                LIMIT ?
-                """,
-                (max(1, min(63, task_limit)),),
-            ).fetchall()
             recent_count = database.execute(
                 "SELECT COUNT(*) FROM task_events WHERE occurred_at_ms >= ?",
                 (window_start,),

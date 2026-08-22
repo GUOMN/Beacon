@@ -19,6 +19,7 @@ from windows_app.ble_worker import BLEWorker, identify_status_device, scan_statu
 from codex_status_core.event_data_source import EventDataSource
 from codex_status_core.event_store import BridgeSnapshot, EventIngestServer, StatusEventStore
 from codex_status_core.codex_session_source import CodexSessionSource
+from codex_status_core.tray import TrayController
 from codex_status_core.hook_adapter import report_codex_notification, report_hook
 from codex_status_core.hook_manager import install as install_hook, providers as hook_providers, status as hook_status, uninstall as uninstall_hook
 
@@ -46,6 +47,10 @@ class WindowsDashboardApp:
         self._status_records: dict[str, dict[str, object]] = {}
         self._lamp_color_images: dict[tuple[int, int, int], tk.PhotoImage] = {}
         self._checked_task_ids: set[str] = set()
+        self._state_filters = {
+            state: tk.BooleanVar(value=True)
+            for state in (TaskState.RUNNING, TaskState.WAITING, TaskState.SUCCESS, TaskState.WARNING, TaskState.FAILURE)
+        }
         self._drag_task_item: str | None = None
         self._drag_task_moved = False
         self._style_colors: dict[TaskState, tuple[int, int, int]] = {}
@@ -79,9 +84,14 @@ class WindowsDashboardApp:
             lambda: max(1, self._total_led_count.get() - 1),
         )
         self._codex_data_source.start()
+        self._tray = TrayController(
+            lambda: self.root.after(0, self._show_from_tray),
+            lambda: self.root.after(0, self._quit_app),
+        )
+        self._tray.start()
         self.root.after(200, self._refresh_status_page)
         self.root.after(100, self._drain_events)
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
 
     def _build_ui(self) -> None:
         style = ttk.Style(self.root)
@@ -236,15 +246,25 @@ class WindowsDashboardApp:
             metrics.columnconfigure(column, weight=1)
 
         ttk.Label(status_tab, text="任务与灯位", font=("Microsoft YaHei UI", 12, "bold")).pack(anchor=tk.W)
+        filters = ttk.Frame(status_tab)
+        filters.pack(fill=tk.X, pady=(6, 2))
+        ttk.Label(filters, text="显示状态：", foreground="#666666").pack(side=tk.LEFT)
+        for state in (TaskState.RUNNING, TaskState.WAITING, TaskState.SUCCESS, TaskState.WARNING, TaskState.FAILURE):
+            ttk.Checkbutton(
+                filters,
+                text=state.chinese_name,
+                variable=self._state_filters[state],
+                command=self._refresh_status_page,
+            ).pack(side=tk.LEFT, padx=(0, 10))
         task_actions = ttk.Frame(status_tab)
         task_actions.pack(fill=tk.X, pady=(4, 8))
         ttk.Button(task_actions, text="删除选中任务", command=self._delete_selected_tasks, style="Danger.TButton").pack(side=tk.RIGHT)
         ttk.Button(task_actions, text="删除已完成任务", command=self._delete_completed_tasks, style="Danger.TButton").pack(side=tk.RIGHT, padx=(0, 8))
         ttk.Label(task_actions, text="第一个灯是系统状态灯，从第二个灯开始计数，灯位为 1；双击可编辑，拖动可调整灯位。", foreground="#777777").pack(side=tk.LEFT)
-        self._status_tree = ttk.Treeview(status_tab, columns=("led", "effect", "task", "state", "summary", "source"), show="tree headings", selectmode="none")
+        self._status_tree = ttk.Treeview(status_tab, columns=("pin", "led", "effect", "task", "state", "summary", "source"), show="tree headings", selectmode="none")
         self._status_tree.heading("#0", text="选择 / 排序")
         self._status_tree.column("#0", width=155, anchor=tk.W)
-        for key, title, width in (("led", "灯位", 60), ("effect", "当前灯效", 105), ("task", "任务", 190), ("state", "任务状态", 85), ("summary", "摘要", 300), ("source", "来源", 75)):
+        for key, title, width in (("pin", "固定", 64), ("led", "灯位", 60), ("effect", "当前灯效", 105), ("task", "任务", 190), ("state", "任务状态", 85), ("summary", "摘要", 260), ("source", "来源", 75)):
             self._status_tree.heading(key, text=title)
             self._status_tree.column(key, width=width, anchor=tk.W)
         self._status_tree.pack(fill=tk.BOTH, expand=True)
@@ -751,6 +771,12 @@ class WindowsDashboardApp:
         if tree is None or not tree.winfo_exists():
             return
         records = self._event_store.latest_records(500)
+        position_by_task_id = {
+            str(record["task_id"]): index + 1
+            for index, record in enumerate(records)
+        }
+        enabled_states = {state.name.lower() for state, enabled in self._state_filters.items() if enabled.get()}
+        records = [record for record in records if record["state"] in enabled_states]
         tree.delete(*tree.get_children())
         self._status_task_ids.clear()
         self._status_records.clear()
@@ -764,14 +790,16 @@ class WindowsDashboardApp:
             effect = self._style_effects[state_enum].get() if state_enum in self._style_effects else "熄灭"
             lamp_effect = effect
             task_capacity = max(1, self._total_led_count.get() - 1)
-            led_position: object = index + 1 if index < task_capacity else "未分配"
+            actual_position = position_by_task_id[str(record["task_id"])]
+            led_position: object = actual_position if actual_position <= task_capacity else "未分配"
             image = self._lamp_color_images.get(color)
             if image is None:
                 image = tk.PhotoImage(width=14, height=14)
                 image.put(self._hex_color(color), to=(0, 0, 14, 14))
                 self._lamp_color_images[color] = image
             checked = "☑  已选" if str(record["task_id"]) in self._checked_task_ids else "☐  选择"
-            tree.insert("", tk.END, iid=iid, text=f"{checked}     ⠿", image=image, values=(led_position, lamp_effect, record["title"], state, record["summary"], record["source"]))
+            pin_text = "📌 已固定" if record.get("pinned") else "固定"
+            tree.insert("", tk.END, iid=iid, text=f"{checked}     ⠿", image=image, values=(pin_text, led_position, lamp_effect, record["title"], state, record["summary"], record["source"]))
 
     def _begin_task_drag(self, event: tk.Event) -> str | None:
         tree = self._status_tree
@@ -782,11 +810,20 @@ class WindowsDashboardApp:
         self._drag_task_moved = False
         if not row:
             return None
-        if tree.identify_column(event.x) != "#0":
+        column = tree.identify_column(event.x)
+        task_id = self._status_task_ids.get(row)
+        if column == "#1" and task_id:
+            record = self._status_records.get(row, {})
+            # 固定前先把当前自动排序写入灯位，避免点击固定后任务跳到旧位置。
+            current_order = [str(item["task_id"]) for item in self._event_store.latest_records(500)]
+            self._event_store.reorder_tasks(current_order)
+            self._event_store.set_pinned(task_id, not bool(record.get("pinned")))
+            self._refresh_status_page()
+            return "break"
+        if column != "#0":
             return None
         bounds = tree.bbox(row, "#0")
         relative_x = event.x - bounds[0] if bounds else 0
-        task_id = self._status_task_ids.get(row)
         if relative_x < 108 and task_id:
             if task_id in self._checked_task_ids:
                 self._checked_task_ids.remove(task_id)
@@ -819,6 +856,9 @@ class WindowsDashboardApp:
             return
         ordered_ids = [self._status_task_ids[item] for item in tree.get_children() if item in self._status_task_ids]
         self._event_store.reorder_tasks(ordered_ids)
+        source_task_id = self._status_task_ids.get(source)
+        if source_task_id:
+            self._event_store.set_pinned(source_task_id, True)
         self._refresh_status_page()
         self._post_status("任务灯位顺序已保存")
 
@@ -828,8 +868,6 @@ class WindowsDashboardApp:
             return
         task_ids = list(self._checked_task_ids)
         if not task_ids:
-            return
-        if not messagebox.askyesno("永久删除任务", f"将永久删除选中的 {len(task_ids)} 个任务及全部历史记录，无法恢复。是否继续？", parent=self.root):
             return
         self._event_store.delete_tasks(task_ids)
         self._checked_task_ids.difference_update(task_ids)
@@ -841,8 +879,6 @@ class WindowsDashboardApp:
         task_ids = [str(record["task_id"]) for record in records if record["state"] == "success"]
         if not task_ids:
             self._post_status("当前没有已完成任务可删除")
-            return
-        if not messagebox.askyesno("删除已完成任务", f"将永久删除 {len(task_ids)} 个已完成任务及全部历史记录，无法恢复。是否继续？", parent=self.root):
             return
         self._event_store.delete_tasks(task_ids)
         self._refresh_status_page()
@@ -865,9 +901,9 @@ class WindowsDashboardApp:
         dialog.grab_set()
         content = ttk.Frame(dialog, padding=18)
         content.pack(fill=tk.BOTH, expand=True)
-        title = tk.StringVar(value=values[1])
-        state = tk.StringVar(value=values[2])
-        summary = tk.StringVar(value=values[3])
+        title = tk.StringVar(value=values[3])
+        state = tk.StringVar(value=values[4])
+        summary = tk.StringVar(value=values[5])
         for row, label in enumerate(("任务名称", "状态", "摘要")):
             ttk.Label(content, text=label, width=10).grid(row=row, column=0, sticky=tk.W, pady=6)
         ttk.Entry(content, textvariable=title, width=48).grid(row=0, column=1, sticky=tk.EW)
@@ -1357,12 +1393,22 @@ class WindowsDashboardApp:
             self._log.configure(state=tk.DISABLED)
         self.root.after(100, self._drain_events)
 
-    def _on_close(self) -> None:
+    def _hide_to_tray(self) -> None:
+        self.root.withdraw()
+        self._post_status("窗口已隐藏，后台服务继续运行")
+
+    def _show_from_tray(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _quit_app(self) -> None:
         self._codex_session_source.stop()
         self._codex_data_source.stop()
         self._event_server.stop()
         if self._worker is not None:
             self._worker.stop()
+        self._tray.stop()
         self.root.destroy()
 
 

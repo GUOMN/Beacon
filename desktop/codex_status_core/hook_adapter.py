@@ -36,6 +36,21 @@ def _task_id(provider: str, payload: dict[str, Any]) -> str:
     return f"{provider}:{hashlib.sha256(seed).hexdigest()[:24]}"
 
 
+def _task_identity(provider: str, payload: dict[str, Any], state: str) -> dict[str, str]:
+    """只在开始事件提取短标题/摘要，后续状态事件不覆盖它们。"""
+    if state != "running":
+        return {}
+    text = ""
+    for key in ("prompt", "user_prompt", "message", "query", "input"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            text = " ".join(value.split())
+            break
+    if text:
+        return {"title": text[:80], "summary": text[:240]}
+    return {"title": f"{provider.title()} 任务"}
+
+
 def report_hook(provider: str, event_name: str, endpoint: str = "http://127.0.0.1:8765/v1/events") -> int:
     """尽力上报并永远成功退出，不能阻断宿主工具的任务。"""
     payload = _read_payload()
@@ -44,12 +59,12 @@ def report_hook(provider: str, event_name: str, endpoint: str = "http://127.0.0.
         return 0
     event = {
         "task_id": _task_id(provider, payload),
-        "title": f"{provider.title()} 任务",
         "state": state,
         "progress": 100 if state == "success" else 0,
         "source": provider,
         "occurred_at_ms": time.time_ns() // 1_000_000,
     }
+    event.update(_task_identity(provider, payload, state))
     try:
         request = urllib.request.Request(endpoint, json.dumps(event).encode("utf-8"), {"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(request, timeout=0.2):
@@ -76,7 +91,6 @@ def report_codex_notification(raw_payload: str) -> int:
         task_id = _task_id("codex", payload)
     event = {
         "task_id": task_id,
-        "title": "Codex 任务",
         "state": "success",
         "progress": 100,
         "source": "codex",

@@ -48,12 +48,13 @@ class EventPipelineTests(unittest.TestCase):
             self.assertIn("existing-notifier.exe", restored)
             self.assertIn("[features]", restored)
 
-    def test_task_order_and_hidden_state_drive_lamp_snapshot(self) -> None:
+    def test_active_sort_pin_and_delete_drive_lamp_snapshot(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             store = StatusEventStore(Path(folder) / "events.sqlite")
             for task_id in ("one", "two", "three"):
                 store.record({"task_id": task_id, "title": task_id, "state": "running"})
             store.reorder_tasks(["three", "one", "two"])
+            store.set_pinned("three", True)
             self.assertEqual([item["task_id"] for item in store.latest_records()], ["three", "one", "two"])
             store.delete_tasks(["one"])
             self.assertEqual([item.title for item in store.snapshot(2).tasks], ["three", "two"])
@@ -71,6 +72,7 @@ class EventPipelineTests(unittest.TestCase):
             self.assertEqual(record["summary"], "实现 蓝牙 状态灯")
             source._consume("thread", {"type": "event_msg", "payload": {"type": "task_complete"}})
             self.assertEqual(store.latest_records()[0]["state"], "success")
+            self.assertEqual(store.latest_records()[0]["summary"], "实现 蓝牙 状态灯")
 
 
 if __name__ == "__main__":

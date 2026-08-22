@@ -72,7 +72,8 @@ class CodexSessionSource:
     def poll_once(self) -> None:
         self._load_titles()
         for path in self._session_files():
-            offset = self._offsets.get(path, path.stat().st_size)
+            # 新创建的会话文件必须从头读取，否则会漏掉最前面的 task_started。
+            offset = self._offsets.get(path, 0)
             size = path.stat().st_size
             if size < offset:
                 offset = 0
