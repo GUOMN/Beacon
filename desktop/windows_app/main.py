@@ -15,7 +15,7 @@ from windows_app.ble_worker import BLEWorker, identify_status_device, scan_statu
 class WindowsDashboardApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Codex 六灯蓝牙桥接")
+        self.root.title("Codex 状态灯")
         self.root.geometry("1120x760")
         self.root.minsize(720, 580)
 
@@ -50,22 +50,77 @@ class WindowsDashboardApp:
 
     def _build_ui(self) -> None:
         style = ttk.Style(self.root)
-        style.configure("Primary.TButton", font=("Microsoft YaHei UI", 11, "bold"), padding=(18, 10))
-
-        menu_bar = tk.Menu(self.root)
-        settings_menu = tk.Menu(menu_bar, tearoff=False)
-        settings_menu.add_command(label="设备管理…", command=self._open_device_manager)
-        settings_menu.add_separator()
-        settings_menu.add_command(label="灯带设置…", command=self._open_led_settings)
-        menu_bar.add_cascade(label="设置", menu=settings_menu)
-        self.root.configure(menu=menu_bar)
+        style.theme_use("clam")
+        self.root.configure(background="#F4F7FB")
+        self.root.option_add("*Font", ("Microsoft YaHei UI", 10))
+        style.configure(".", font=("Microsoft YaHei UI", 10))
+        style.configure("TFrame", background="#F4F7FB")
+        style.configure("TLabel", background="#F4F7FB", foreground="#172033")
+        style.configure(
+            "TLabelframe",
+            background="#F4F7FB",
+            bordercolor="#D9E2EF",
+            borderwidth=1,
+            relief="solid",
+        )
+        style.configure(
+            "TLabelframe.Label",
+            background="#F4F7FB",
+            foreground="#172033",
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        style.configure(
+            "TButton",
+            background="#E8EEF7",
+            foreground="#26364D",
+            borderwidth=0,
+            padding=(12, 7),
+            focusthickness=0,
+        )
+        style.map("TButton", background=[("active", "#D9E5F3"), ("pressed", "#CAD9EC")])
+        style.configure(
+            "Primary.TButton",
+            background="#2563EB",
+            foreground="#FFFFFF",
+            font=("Microsoft YaHei UI", 11, "bold"),
+            padding=(20, 11),
+        )
+        style.map(
+            "Primary.TButton",
+            background=[("active", "#1D4ED8"), ("pressed", "#1E40AF")],
+            foreground=[("disabled", "#DCE7FF")],
+        )
+        style.configure("TCombobox", padding=5, fieldbackground="#FFFFFF")
+        style.configure("TSpinbox", padding=5, fieldbackground="#FFFFFF")
+        style.configure(
+            "Treeview",
+            background="#FFFFFF",
+            fieldbackground="#FFFFFF",
+            foreground="#172033",
+            rowheight=30,
+            borderwidth=0,
+        )
+        style.configure(
+            "Treeview.Heading",
+            background="#E8EEF7",
+            foreground="#26364D",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padding=7,
+        )
+        style.map("Treeview", background=[("selected", "#DCE8FF")], foreground=[("selected", "#163A75")])
 
         outer = ttk.Frame(self.root, padding=18)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(outer, textvariable=self._status, font=("Microsoft YaHei UI", 12, "bold")).pack(
-            anchor=tk.W, pady=(0, 12)
-        )
+        top_bar = ttk.Frame(outer)
+        top_bar.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(
+            top_bar,
+            textvariable=self._status,
+            font=("Microsoft YaHei UI", 13, "bold"),
+            foreground="#163A75",
+        ).pack(side=tk.LEFT, anchor=tk.W)
+        ttk.Button(top_bar, text="设备管理", command=self._open_device_manager).pack(side=tk.RIGHT)
 
         usage = ttk.LabelFrame(outer, text="第一颗灯 · 系统用量", padding=12)
         usage.pack(fill=tk.X)
@@ -165,7 +220,20 @@ class WindowsDashboardApp:
             font=("Microsoft YaHei UI", 10, "bold"),
         ).pack(side=tk.LEFT)
         ttk.Button(log_header, text="一键清空", command=self._clear_log).pack(side=tk.RIGHT)
-        self._log = tk.Text(outer, height=12, state=tk.DISABLED, font=("Consolas", 9))
+        self._log = tk.Text(
+            outer,
+            height=12,
+            state=tk.DISABLED,
+            font=("Cascadia Mono", 9),
+            background="#111827",
+            foreground="#D1E0F5",
+            insertbackground="#FFFFFF",
+            selectbackground="#31598F",
+            relief=tk.FLAT,
+            borderwidth=0,
+            padx=12,
+            pady=10,
+        )
         self._log.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
 
     @staticmethod
