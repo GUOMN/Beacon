@@ -51,7 +51,7 @@ class WindowsDashboardApp:
             state: tk.BooleanVar(value=True)
             for state in (TaskState.RUNNING, TaskState.WAITING, TaskState.SUCCESS, TaskState.WARNING, TaskState.FAILURE)
         }
-        self._state_filter_buttons: dict[TaskState, ttk.Button] = {}
+        self._state_filter_summary = tk.StringVar(value="状态筛选（5）")
         self._drag_task_item: str | None = None
         self._drag_task_moved = False
         self._style_colors: dict[TaskState, tuple[int, int, int]] = {}
@@ -265,16 +265,19 @@ class WindowsDashboardApp:
         task_header = ttk.Frame(status_tab)
         task_header.pack(fill=tk.X)
         ttk.Label(task_header, text="任务与灯位", font=("Microsoft YaHei UI", 12, "bold")).pack(side=tk.LEFT)
-        ttk.Label(task_header, text="筛选", foreground="#777777").pack(side=tk.LEFT, padx=(18, 6))
+        filter_button = ttk.Menubutton(task_header, textvariable=self._state_filter_summary)
+        filter_button.pack(side=tk.LEFT, padx=(18, 0))
+        filter_menu = tk.Menu(filter_button, tearoff=False, font=("Microsoft YaHei UI", 10))
         for state in (TaskState.RUNNING, TaskState.WAITING, TaskState.SUCCESS, TaskState.WARNING, TaskState.FAILURE):
-            button = ttk.Button(
-                task_header,
-                text=f"● {state.chinese_name}",
-                style="FilterOn.TButton",
-                command=lambda selected=state: self._toggle_state_filter(selected),
+            filter_menu.add_checkbutton(
+                label=state.chinese_name,
+                variable=self._state_filters[state],
+                command=self._state_filter_changed,
             )
-            button.pack(side=tk.LEFT, padx=(0, 4))
-            self._state_filter_buttons[state] = button
+        filter_menu.add_separator()
+        filter_menu.add_command(label="全部显示", command=lambda: self._set_all_state_filters(True))
+        filter_menu.add_command(label="全部隐藏", command=lambda: self._set_all_state_filters(False))
+        filter_button.configure(menu=filter_menu)
         task_actions = ttk.Frame(status_tab)
         task_actions.pack(fill=tk.X, pady=(4, 8))
         ttk.Button(task_actions, text="删除选中任务", command=self._delete_selected_tasks, style="Danger.TButton").pack(side=tk.RIGHT)
@@ -785,16 +788,15 @@ class WindowsDashboardApp:
     def _post_codex_snapshot(self, snapshot: BridgeSnapshot) -> None:
         self._events.put(("codex_snapshot", snapshot))
 
-    def _toggle_state_filter(self, state: TaskState) -> None:
-        enabled = not self._state_filters[state].get()
-        self._state_filters[state].set(enabled)
-        button = self._state_filter_buttons.get(state)
-        if button is not None:
-            button.configure(
-                text=f"{'●' if enabled else '○'} {state.chinese_name}",
-                style="FilterOn.TButton" if enabled else "FilterOff.TButton",
-            )
+    def _state_filter_changed(self) -> None:
+        selected_count = sum(1 for enabled in self._state_filters.values() if enabled.get())
+        self._state_filter_summary.set(f"状态筛选（{selected_count}）")
         self._refresh_status_page()
+
+    def _set_all_state_filters(self, enabled: bool) -> None:
+        for state_filter in self._state_filters.values():
+            state_filter.set(enabled)
+        self._state_filter_changed()
 
     def _refresh_status_page(self) -> None:
         tree = self._status_tree
@@ -1450,7 +1452,16 @@ def main() -> None:
         try:
             previous = json.loads(base64.urlsafe_b64decode(sys.argv[2]).decode("utf-8"))
             if previous:
-                subprocess.Popen([*previous, raw_payload], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # Codex 每轮结束都会调用这里。旧通知程序必须完全静默启动，
+                # 否则 Windows 会短暂显示控制台窗口，影响常驻上位机体验。
+                creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                subprocess.Popen(
+                    [*previous, raw_payload],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=creation_flags,
+                )
         except Exception:
             pass
         raise SystemExit(report_codex_notification(raw_payload))
