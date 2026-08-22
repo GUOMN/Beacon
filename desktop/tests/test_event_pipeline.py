@@ -32,6 +32,21 @@ class EventPipelineTests(unittest.TestCase):
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(data["hooks"]["Stop"][0]["hooks"][0]["command"], "existing")
 
+    def test_codex_notify_chains_and_restores_existing_callback(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            path = Path(folder) / "config.toml"
+            original = ["existing-notifier.exe", "turn-ended"]
+            path.write_text("notify = " + json.dumps(original) + "\n[features]\njs_repl = false\n", encoding="utf-8")
+            provider = HookProvider("codex", "Codex", path, (("notify", "success"),))
+            with patch("codex_status_core.hook_manager._codex_backup_path", return_value=Path(folder) / "backup.json"):
+                install(provider)
+                self.assertEqual(status(provider), "已启用")
+                self.assertIn("--status-bridge-codex-notify", path.read_text(encoding="utf-8"))
+                uninstall(provider)
+            restored = path.read_text(encoding="utf-8")
+            self.assertIn("existing-notifier.exe", restored)
+            self.assertIn("[features]", restored)
+
 
 if __name__ == "__main__":
     unittest.main()

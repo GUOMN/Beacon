@@ -58,3 +58,34 @@ def report_hook(provider: str, event_name: str, endpoint: str = "http://127.0.0.
         pass
     return 0
 
+
+def report_codex_notification(raw_payload: str) -> int:
+    """处理 Codex 官方 notify 的每轮结束通知，不保存输入或输出正文。"""
+    try:
+        payload = json.loads(raw_payload)
+        if not isinstance(payload, dict):
+            payload = {}
+    except Exception:
+        payload = {}
+    task_id = ""
+    for key in ("thread-id", "thread_id", "conversation-id", "conversation_id"):
+        if payload.get(key):
+            task_id = f"codex:{payload[key]}"
+            break
+    if not task_id:
+        task_id = _task_id("codex", payload)
+    event = {
+        "task_id": task_id,
+        "title": "Codex 任务",
+        "state": "success",
+        "progress": 100,
+        "source": "codex",
+        "occurred_at_ms": time.time_ns() // 1_000_000,
+    }
+    try:
+        request = urllib.request.Request("http://127.0.0.1:8765/v1/events", json.dumps(event).encode("utf-8"), {"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(request, timeout=0.2):
+            pass
+    except Exception:
+        pass
+    return 0

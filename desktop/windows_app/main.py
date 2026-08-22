@@ -6,6 +6,8 @@ import json
 import math
 import os
 import queue
+import base64
+import subprocess
 import sys
 import tkinter as tk
 from datetime import datetime
@@ -16,7 +18,7 @@ from codex_status_core.models import DashboardSnapshot, StateStyle, TaskSlot, Ta
 from windows_app.ble_worker import BLEWorker, identify_status_device, scan_status_devices
 from codex_status_core.event_data_source import EventDataSource
 from codex_status_core.event_store import BridgeSnapshot, EventIngestServer, StatusEventStore
-from codex_status_core.hook_adapter import report_hook
+from codex_status_core.hook_adapter import report_codex_notification, report_hook
 from codex_status_core.hook_manager import install as install_hook, providers as hook_providers, status as hook_status, uninstall as uninstall_hook
 
 class WindowsDashboardApp:
@@ -1139,6 +1141,21 @@ class WindowsDashboardApp:
 def main() -> None:
     if len(sys.argv) >= 4 and sys.argv[1] == "--status-bridge-hook":
         raise SystemExit(report_hook(sys.argv[2], sys.argv[3]))
+    if len(sys.argv) >= 3 and sys.argv[1] == "--status-bridge-codex-notify":
+        raw_payload = sys.argv[3] if len(sys.argv) >= 4 else "{}"
+        try:
+            previous = json.loads(base64.urlsafe_b64decode(sys.argv[2]).decode("utf-8"))
+            if previous:
+                subprocess.Popen([*previous, raw_payload], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        raise SystemExit(report_codex_notification(raw_payload))
+    if len(sys.argv) >= 4 and sys.argv[1] == "--manage-hook":
+        selected = next((item for item in hook_providers() if item.key == sys.argv[3]), None)
+        if selected is None:
+            raise SystemExit(2)
+        (install_hook if sys.argv[2] == "install" else uninstall_hook)(selected)
+        raise SystemExit(0)
     root = tk.Tk()
     WindowsDashboardApp(root)
     root.mainloop()
