@@ -19,7 +19,7 @@ class WindowsDashboardApp:
         self.root = root
         self.root.title("Codex 状态灯")
         self.root.geometry("1120x760")
-        self.root.minsize(720, 580)
+        self.root.minsize(860, 640)
 
         self._events: queue.SimpleQueue[object] = queue.SimpleQueue()
         self._snapshot = DashboardSnapshot()
@@ -40,6 +40,7 @@ class WindowsDashboardApp:
         self._settings_path = Path(os.getenv("APPDATA", str(Path.home()))) / \
             "CodexStatusBridge" / "settings.json"
         self._bound_device_id = self._load_bound_device_id()
+        self._calibration = self._load_device_calibration(self._bound_device_id)
 
         self._build_ui()
         self._worker: BLEWorker | None = None
@@ -73,13 +74,21 @@ class WindowsDashboardApp:
         )
         style.configure(
             "TButton",
-            background="#E8EEF7",
-            foreground="#26364D",
+            background="#EEF3FA",
+            foreground="#24324A",
             borderwidth=0,
-            padding=(12, 7),
+            padding=(14, 9),
             focusthickness=0,
         )
         style.map("TButton", background=[("active", "#D9E5F3"), ("pressed", "#CAD9EC")])
+        style.configure(
+            "Preview.TButton",
+            background="#E8F0FF",
+            foreground="#1D4ED8",
+            font=("Microsoft YaHei UI", 11, "bold"),
+            padding=(22, 14),
+        )
+        style.map("Preview.TButton", background=[("active", "#DCE8FF"), ("pressed", "#CEDDFF")])
         style.configure(
             "Primary.TButton",
             background="#2563EB",
@@ -154,10 +163,13 @@ class WindowsDashboardApp:
         ttk.Label(
             top_bar,
             textvariable=self._status,
-            font=("Microsoft YaHei UI", 13, "bold"),
+            font=("Microsoft YaHei UI", 15, "bold"),
             foreground="#163A75",
         ).pack(side=tk.LEFT, anchor=tk.W)
         ttk.Button(top_bar, text="设备管理", command=self._open_device_manager).pack(side=tk.RIGHT)
+        ttk.Button(top_bar, text="灯带校准", command=self._open_calibration).pack(
+            side=tk.RIGHT, padx=(0, 8)
+        )
 
         usage = ttk.LabelFrame(outer, text="第一颗灯 · 系统用量", padding=12)
         usage.pack(fill=tk.X)
@@ -243,11 +255,20 @@ class WindowsDashboardApp:
 
             effect_input.bind("<<ComboboxSelected>>", update_timing_inputs)
             update_timing_inputs()
+        preview_area = ttk.Frame(themes)
+        preview_area.grid(row=0, column=8, rowspan=5, padx=(28, 4), sticky=tk.NSEW)
         ttk.Button(
-            themes,
-            text="预览 / Debug",
+            preview_area,
+            text="设置状态并预览",
             command=self._open_debug_preview,
-        ).grid(row=0, column=8, padx=(24, 0), sticky=tk.N)
+            style="Preview.TButton",
+        ).pack(fill=tk.X)
+        ttk.Label(
+            preview_area,
+            text="设置一组 Mock 数据，\n即时查看灯带效果",
+            foreground="#718096",
+            justify=tk.CENTER,
+        ).pack(pady=(10, 0))
 
         log_header = ttk.Frame(outer)
         log_header.pack(fill=tk.X)
@@ -292,6 +313,25 @@ class WindowsDashboardApp:
         )
         ttk.Label(parent, textvariable=variable, width=4).grid(row=row, column=3)
 
+    def _fit_dialog(
+        self,
+        dialog: tk.Toplevel,
+        preferred_width: int,
+        preferred_height: int,
+        minimum_width: int,
+        minimum_height: int,
+    ) -> None:
+        """让弹窗适配当前屏幕并居中，避免低分辨率下底部操作按钮被裁切。"""
+        dialog.update_idletasks()
+        screen_width = dialog.winfo_screenwidth()
+        screen_height = dialog.winfo_screenheight()
+        width = min(preferred_width, max(minimum_width, screen_width - 80))
+        height = min(preferred_height, max(minimum_height, screen_height - 120))
+        x = max(20, (screen_width - width) // 2)
+        y = max(20, (screen_height - height) // 2)
+        dialog.minsize(min(minimum_width, width), min(minimum_height, height))
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+
     def _send(self) -> None:
         # 主界面不再人工编辑任务。发送时保留外部数据源已有状态，新增灯位默认空闲。
         task_count = max(1, min(63, self._total_led_count.get() - 1))
@@ -308,7 +348,7 @@ class WindowsDashboardApp:
             tasks=tasks,
             state_styles={
                 state: StateStyle(
-                    color=color,
+                    color=self._calibrate_color(color),
                     effect={"常亮": 1, "闪烁": 2, "呼吸": 3}[self._style_effects[state].get()],
                     period_ms=max(200, min(10000, round(60000 / max(6, min(300, self._style_frequencies[state].get()))))),
                     blink_duty_percent=max(1, min(100, self._style_duties[state].get())),
@@ -356,12 +396,13 @@ class WindowsDashboardApp:
         ttk.Button(buttons, text="应用", command=apply_and_close).pack(side=tk.LEFT)
         dialog.bind("<Return>", lambda _event: apply_and_close())
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        self._fit_dialog(dialog, 480, 240, 420, 220)
 
     def _open_device_manager(self) -> None:
         """扫描、识别并绑定唯一灯板，避免同名设备之间串扰。"""
         dialog = tk.Toplevel(self.root)
         dialog.title("设备管理")
-        dialog.geometry("680x440")
+        dialog.resizable(True, True)
         dialog.transient(self.root)
 
         outer = ttk.Frame(dialog, padding=16)
@@ -378,7 +419,7 @@ class WindowsDashboardApp:
             columns=("name", "device_id", "rssi", "binding"),
             show="headings",
             selectmode="browse",
-            height=10,
+            height=8,
         )
         tree.heading("name", text="设备名称")
         tree.heading("device_id", text="唯一 ID")
@@ -478,6 +519,7 @@ class WindowsDashboardApp:
         )
         tree.bind("<<TreeviewSelect>>", update_actions)
         scan_status_devices(self._post_scan_results, self._post_status)
+        self._fit_dialog(dialog, 760, 520, 680, 460)
 
     def _load_bound_device_id(self) -> str | None:
         try:
@@ -489,11 +531,57 @@ class WindowsDashboardApp:
 
     def _save_bound_device_id(self, device_id: str | None) -> None:
         self._settings_path.parent.mkdir(parents=True, exist_ok=True)
-        self._settings_path.write_text(
-            json.dumps({"bound_device_id": device_id}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            data = {}
+        data["bound_device_id"] = device_id
+        self._settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         self._bound_device_id = device_id
+        self._calibration = self._load_device_calibration(device_id)
+
+    def _load_device_calibration(self, device_id: str | None) -> dict[str, float]:
+        defaults = {"red": 1.0, "green": 1.0, "blue": 1.0, "gamma": 2.2}
+        if not device_id:
+            return defaults
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+            stored = data.get("device_calibrations", {}).get(device_id, {})
+            return {
+                "red": float(stored.get("red", 1.0)),
+                "green": float(stored.get("green", 1.0)),
+                "blue": float(stored.get("blue", 1.0)),
+                "gamma": float(stored.get("gamma", 2.2)),
+            }
+        except (OSError, ValueError, TypeError, AttributeError):
+            return defaults
+
+    def _save_device_calibration(self, calibration: dict[str, float]) -> None:
+        if not self._bound_device_id:
+            return
+        self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            data = {}
+        calibrations = data.setdefault("device_calibrations", {})
+        calibrations[self._bound_device_id] = calibration
+        self._settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._calibration = calibration.copy()
+
+    def _calibrate_color(
+        self,
+        color: tuple[int, int, int],
+        calibration: dict[str, float] | None = None,
+    ) -> tuple[int, int, int]:
+        """将屏幕 sRGB 颜色转换为灯带 PWM，并应用当前灯板的通道校准。"""
+        values = calibration or self._calibration
+        gamma = max(0.8, min(3.5, values["gamma"]))
+        gains = (values["red"], values["green"], values["blue"])
+        return tuple(
+            max(0, min(255, round(((channel / 255) ** gamma) * 255 * gain)))
+            for channel, gain in zip(color, gains)
+        )
 
     def _start_bound_worker(self, device_id: str) -> None:
         if self._worker is not None:
@@ -506,12 +594,128 @@ class WindowsDashboardApp:
     def _post_scan_results(self, devices: list[dict[str, object]]) -> None:
         self._events.put(("scan_results", devices))
 
+    def _open_calibration(self) -> None:
+        """为当前绑定灯板调整通道增益和伽马，并按唯一 ID 保存。"""
+        if not self._bound_device_id or self._worker is None:
+            self._post_status("请先在设备管理中绑定一块灯板")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("灯带色彩校准")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        outer = ttk.Frame(dialog, padding=22)
+        outer.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            outer, text="校准当前绑定灯板", font=("Microsoft YaHei UI", 15, "bold")
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            outer,
+            text="先发送测试色，再对照实际灯光调整。参数只保存到当前设备。",
+            foreground="#718096",
+        ).pack(anchor=tk.W, pady=(4, 18))
+
+        red = tk.IntVar(value=round(self._calibration["red"] * 100))
+        green = tk.IntVar(value=round(self._calibration["green"] * 100))
+        blue = tk.IntVar(value=round(self._calibration["blue"] * 100))
+        gamma = tk.DoubleVar(value=self._calibration["gamma"])
+
+        controls = ttk.LabelFrame(outer, text="色彩参数", padding=14)
+        controls.pack(fill=tk.X)
+        for row, (label, variable) in enumerate(
+            (("红色增益", red), ("绿色增益", green), ("蓝色增益", blue))
+        ):
+            ttk.Label(controls, text=label, width=10).grid(row=row, column=0, sticky=tk.W, pady=7)
+            ttk.Scale(controls, from_=50, to=150, variable=variable).grid(
+                row=row, column=1, sticky=tk.EW, padx=10
+            )
+            ttk.Label(controls, textvariable=variable, width=5).grid(row=row, column=2)
+        ttk.Label(controls, text="伽马", width=10).grid(row=3, column=0, sticky=tk.W, pady=7)
+        ttk.Scale(controls, from_=0.8, to=3.5, variable=gamma).grid(
+            row=3, column=1, sticky=tk.EW, padx=10
+        )
+        gamma_text = ttk.Label(controls, width=5)
+        gamma_text.grid(row=3, column=2)
+        controls.columnconfigure(1, weight=1)
+
+        def refresh_gamma(_value: object = None) -> None:
+            gamma_text.configure(text=f"{gamma.get():.2f}")
+
+        refresh_gamma()
+        gamma.trace_add("write", lambda *_args: refresh_gamma())
+
+        test_colors = {
+            "中性白": (180, 180, 180),
+            "红色": (255, 0, 0),
+            "绿色": (0, 255, 0),
+            "蓝色": (0, 0, 255),
+            "黄色": (255, 180, 0),
+            "青色": (0, 220, 220),
+            "紫色": (180, 0, 255),
+            "中灰": (128, 128, 128),
+        }
+        test_name = tk.StringVar(value="中性白")
+        test_row = ttk.Frame(outer)
+        test_row.pack(fill=tk.X, pady=18)
+        ttk.Label(test_row, text="测试颜色").pack(side=tk.LEFT)
+        ttk.Combobox(
+            test_row, textvariable=test_name, values=tuple(test_colors), state="readonly", width=12
+        ).pack(side=tk.LEFT, padx=10)
+
+        def current_calibration() -> dict[str, float]:
+            return {
+                "red": red.get() / 100,
+                "green": green.get() / 100,
+                "blue": blue.get() / 100,
+                "gamma": gamma.get(),
+            }
+
+        def send_test() -> None:
+            color = self._calibrate_color(test_colors[test_name.get()], current_calibration())
+            task_count = max(1, min(63, self._total_led_count.get() - 1))
+            preview = DashboardSnapshot(
+                remaining_percent=100,
+                period_used_percent=0,
+                master_brightness_percent=max(10, self._master_brightness.get()),
+                tasks=[
+                    TaskSlot(title=f"校准 {index + 1}", state=TaskState.RUNNING, progress=0)
+                    for index in range(task_count)
+                ],
+                state_styles={TaskState.RUNNING: StateStyle(color=color, effect=1)},
+            )
+            self._worker.submit(preview)
+            self._post_status(f"已向当前灯板发送{test_name.get()}测试色")
+
+        ttk.Button(
+            test_row, text="发送测试色", command=send_test, style="Preview.TButton"
+        ).pack(side=tk.LEFT)
+
+        ttk.Label(
+            outer,
+            text="建议顺序：先用中性白调三个通道，再用中灰调整伽马，最后检查综合色。",
+            foreground="#718096",
+            wraplength=520,
+        ).pack(anchor=tk.W)
+
+        def save_and_close() -> None:
+            self._save_device_calibration(current_calibration())
+            self._post_status("当前灯板的色彩校准已保存")
+            dialog.destroy()
+
+        actions = ttk.Frame(outer)
+        actions.pack(fill=tk.X, side=tk.BOTTOM, pady=(20, 0))
+        ttk.Button(actions, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(
+            actions, text="保存校准", command=save_and_close, style="Primary.TButton"
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+        self._fit_dialog(dialog, 620, 610, 560, 520)
+
     def _open_debug_preview(self) -> None:
         """在真实任务数据接入前，手动预览系统灯与各任务状态。"""
         dialog = tk.Toplevel(self.root)
         dialog.title("灯光状态预览 / Debug")
-        dialog.geometry("520x620")
-        dialog.minsize(460, 420)
+        dialog.resizable(True, True)
         dialog.transient(self.root)
 
         outer = ttk.Frame(dialog, padding=16)
@@ -584,7 +788,10 @@ class WindowsDashboardApp:
         actions = ttk.Frame(outer)
         actions.pack(fill=tk.X)
         ttk.Button(actions, text="关闭", command=dialog.destroy).pack(side=tk.RIGHT)
-        ttk.Button(actions, text="发送预览", command=send_preview).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(
+            actions, text="应用 Mock 数据并预览", command=send_preview, style="Primary.TButton"
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+        self._fit_dialog(dialog, 620, 700, 540, 520)
 
     @staticmethod
     def _hex_color(color: tuple[int, int, int]) -> str:
@@ -594,8 +801,7 @@ class WindowsDashboardApp:
         """使用 HSV 色环选择颜色，明度单独调节。"""
         dialog = tk.Toplevel(self.root)
         dialog.title(f"选择颜色 · {state.chinese_name}")
-        dialog.geometry("470x520")
-        dialog.resizable(False, False)
+        dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.configure(background="#F4F7FB")
@@ -679,8 +885,8 @@ class WindowsDashboardApp:
             update_marker()
             update_preview()
 
+        # 只在明确单击时更新颜色，避免选中后圆点继续跟随鼠标移动。
         canvas.bind("<Button-1>", select_from_wheel)
-        canvas.bind("<B1-Motion>", select_from_wheel)
         update_marker()
 
         brightness_row = ttk.Frame(outer)
@@ -724,6 +930,7 @@ class WindowsDashboardApp:
         ttk.Button(actions, text="应用颜色", command=save_color, style="Primary.TButton").pack(
             side=tk.RIGHT, padx=(0, 8)
         )
+        self._fit_dialog(dialog, 500, 620, 460, 520)
 
     def _post_status(self, message: str) -> None:
         self._events.put(message)
