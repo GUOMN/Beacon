@@ -1,0 +1,50 @@
+name: Build macOS ARM64 test package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Confirm native architecture
+        run: |
+          test "$(uname -m)" = "arm64"
+          python -c "import platform; assert platform.machine() == 'arm64'"
+
+      - name: Install packaging dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+
+      - name: Run shared tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build unsigned application
+        run: pyinstaller --clean --noconfirm CodexStatusBridge-macOS-arm64.spec
+
+      - name: Verify ARM64 executable
+        run: file "dist/Codex Status Bridge.app/Contents/MacOS/CodexStatusBridge" | grep -q arm64
+
+      - name: Package application
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/Codex Status Bridge.app" "dist/CodexStatusBridge-macOS-arm64-test.zip"
+
+      - name: Upload temporary build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexStatusBridge-macOS-arm64-test
+          path: desktop/dist/CodexStatusBridge-macOS-arm64-test.zip
+          if-no-files-found: error
+          retention-days: 14
