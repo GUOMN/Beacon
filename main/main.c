@@ -14,8 +14,6 @@ static const char *TAG = "status_panel";
 
 void app_main(void)
 {
-    /* 新 OTA 镜像能正常进入 app_main 即确认有效，避免下次启动自动回滚。 */
-    esp_ota_mark_app_valid_cancel_rollback();
     /* 上电时先读取上位机保存的灯珠数，首次启动默认 6 颗。 */
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(dashboard_status_load_saved_styles());
@@ -79,6 +77,10 @@ void app_main(void)
     ESP_ERROR_CHECK(led_status_start(strip, secondary_strip, saved_channels));
     ESP_ERROR_CHECK(status_input_start_transports());
     ESP_ERROR_CHECK(ble_status_service_start());
+
+    /* 只有灯带、输入和蓝牙全部初始化成功后才确认 OTA 镜像。
+     * 如果新镜像在此之前启动失败，下次重启仍可由 bootloader 回滚。 */
+    ESP_ERROR_CHECK(esp_ota_mark_app_valid_cancel_rollback());
 
     ESP_LOGI(TAG, "六灯纯蓝牙状态面板就绪：GPIO %d", STATUS_DATA_GPIO);
 }

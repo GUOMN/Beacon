@@ -47,7 +47,9 @@
 /* ==================== 驱动固定参数 ==================== */
 
 #define STATUS_RMT_RESOLUTION_HZ         (10U * 1000U * 1000U)
-#define STATUS_RMT_MEMORY_SYMBOLS        128U
+// ESP32-C3 每个 RMT 硬件内存块为 48 个 symbol，共 4 块。每路只占 1 块，
+// 才能稳定同时创建 GPIO8 与 GPIO10 两个发送通道。
+#define STATUS_RMT_MEMORY_SYMBOLS        48U
 
 #if STATUS_LED_DEFAULT_COUNT < 2U || STATUS_LED_DEFAULT_COUNT > STATUS_LED_MAX_COUNT
 #error "STATUS_LED_DEFAULT_COUNT 必须在 2~STATUS_LED_MAX_COUNT 之间"
