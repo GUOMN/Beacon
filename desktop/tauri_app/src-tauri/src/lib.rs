@@ -276,11 +276,19 @@ async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, St
 
 #[tauri::command]
 async fn identify_device(state: tauri::State<'_, NativeBleState>, address: String) -> Result<Value, String> {
-    let peripheral = connect_peripheral(Some(&address), None).await?;
+    let peripheral = {
+        let held = state.peripheral.lock().await;
+        match held.as_ref() {
+            Some(item) if item.is_connected().await.unwrap_or(false) => item.clone(),
+            _ => connect_peripheral(Some(&address), None).await?,
+        }
+    };
     let control = characteristic(&peripheral, CONTROL_UUID)?;
+    let _guard = state.write_lock.lock().await;
     peripheral.write(&control, &[0xC3, 1, 4, 0], WriteType::WithResponse).await
         .map_err(|error| format!("发送识别动画失败：{error}"))?;
     *state.peripheral.lock().await = Some(peripheral);
+    start_heartbeat(state.inner().clone());
     Ok(serde_json::json!({"ok": true}))
 }
 
@@ -295,12 +303,20 @@ async fn ota_start(
         return Err("固件大小无效".into());
     }
     let firmware_len = firmware.len();
-    let peripheral = connect_peripheral(Some(&address), None).await?;
+    let peripheral = {
+        let held = state.peripheral.lock().await;
+        match held.as_ref() {
+            Some(item) if item.is_connected().await.unwrap_or(false) => item.clone(),
+            _ => connect_peripheral(Some(&address), None).await?,
+        }
+    };
     let ota = characteristic(&peripheral, OTA_UUID)?;
     *state.ota_progress.lock().await = serde_json::json!({"state":"running","progress":0,"message":"正在写入固件"});
     let progress = state.ota_progress.clone();
     let held = state.peripheral.clone();
+    let write_lock = state.write_lock.clone();
     tauri::async_runtime::spawn(async move {
+        let _guard = write_lock.lock().await;
         let result: Result<(), String> = async {
             let size = firmware.len() as u32;
             let start = [1, size as u8, (size >> 8) as u8, (size >> 16) as u8, (size >> 24) as u8];
