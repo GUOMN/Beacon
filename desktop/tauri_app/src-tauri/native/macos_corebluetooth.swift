@@ -143,7 +143,7 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
         guard let encoded = request["packets"] as? [String] else {
             completion(["error": "配置数据格式无效"]); return
         }
-        let packets = encoded.compactMap(Data.init(base64Encoded:))
+        let packets = encoded.compactMap { Data(base64Encoded: $0) }
         guard packets.count == encoded.count else {
             completion(["error": "配置数据格式无效"]); return
         }
