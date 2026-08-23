@@ -58,6 +58,7 @@ struct NativeBleState {
     preview_active: Arc<AsyncMutex<bool>>,
     heartbeat_running: Arc<AtomicBool>,
     sequence: Arc<AtomicU8>,
+    connected_device_id: Arc<AsyncMutex<Option<String>>>,
 }
 
 impl NativeBleState {
@@ -72,6 +73,7 @@ impl NativeBleState {
             preview_active: Arc::new(AsyncMutex::new(false)),
             heartbeat_running: Arc::new(AtomicBool::new(false)),
             sequence: Arc::new(AtomicU8::new(0)),
+            connected_device_id: Arc::new(AsyncMutex::new(None)),
         }
     }
 }
@@ -206,10 +208,25 @@ async fn get_dashboard(
 }
 
 #[tauri::command]
-async fn scan_devices() -> Result<Value, String> {
+async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, String> {
     // The Tauri process owns Bluetooth on both platforms. On macOS this makes
     // the permission request belong to the signed Beacon app instead of a
     // transient Python helper, so scanning cannot finish before authorization.
+    if let (Some(peripheral), Some(device_id)) = (
+        ble.peripheral.lock().await.clone(),
+        ble.connected_device_id.lock().await.clone(),
+    ) {
+        if peripheral.is_connected().await.unwrap_or(false) {
+            let properties = peripheral.properties().await.ok().flatten();
+            return Ok(serde_json::json!({"devices": [{
+                "name": format!("{DEVICE_PREFIX}{device_id}"),
+                "device_id": device_id,
+                "address": peripheral.id().to_string(),
+                "rssi": properties.and_then(|value| value.rssi),
+                "connected": true,
+            }]}));
+        }
+    }
     let manager = BleManager::new().await.map_err(|error| format!("蓝牙初始化失败：{error}"))?;
     let adapters = manager.adapters().await.map_err(|error| format!("读取蓝牙适配器失败：{error}"))?;
     if adapters.is_empty() {
@@ -224,7 +241,7 @@ async fn scan_devices() -> Result<Value, String> {
     // scan after approval instead of returning an early empty result.
     tokio::time::sleep(std::time::Duration::from_secs(12)).await;
 
-    let mut devices = Vec::new();
+    let mut devices: Vec<Value> = Vec::new();
     for adapter in &adapters {
         let peripherals = adapter.peripherals().await
             .map_err(|error| format!("读取蓝牙设备失败：{error}"))?;
@@ -235,6 +252,9 @@ async fn scan_devices() -> Result<Value, String> {
             let Some(device_id) = name.strip_prefix(DEVICE_PREFIX) else { continue };
             let device_id = device_id.to_ascii_uppercase();
             if device_id.len() != 6 || !device_id.chars().all(|value| value.is_ascii_hexdigit()) {
+                continue;
+            }
+            if devices.iter().any(|item| item.get("device_id").and_then(Value::as_str) == Some(&device_id)) {
                 continue;
             }
             devices.push(serde_json::json!({
@@ -341,6 +361,7 @@ async fn native_apply(bridge: BridgeState, ble: NativeBleState, mut payload: Val
             .map_err(|error| format!("配置下发失败：{error}"))?;
     }
     *ble.peripheral.lock().await = Some(peripheral);
+    *ble.connected_device_id.lock().await = Some(device_id.to_string());
     start_heartbeat(ble.clone());
     Ok(prepared)
 }
