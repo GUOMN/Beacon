@@ -35,6 +35,15 @@ class WindowsDashboardApp:
         self._remaining = tk.IntVar(value=100)
         self._period_used = tk.IntVar(value=0)
         self._master_brightness = tk.IntVar(value=60)
+        self._busy_weight_vars = {
+            "task": tk.IntVar(value=30),
+            "token": tk.IntVar(value=20),
+            "cpu": tk.IntVar(value=20),
+            "memory": tk.IntVar(value=10),
+            "disk": tk.IntVar(value=10),
+            "network": tk.IntVar(value=10),
+        }
+        self._busy_formula_text = tk.StringVar()
         self._total_led_count = tk.IntVar(value=6)
         self._total_led_text = tk.StringVar(value="总灯数：6")
         self._status = tk.StringVar(value="连接中")
@@ -64,6 +73,10 @@ class WindowsDashboardApp:
         self._scanned_devices: dict[str, dict[str, object]] = {}
         self._settings_path = Path(os.getenv("APPDATA", str(Path.home()))) / \
             "CodexStatusBridge" / "settings.json"
+        for key, value in self._load_busy_weights().items():
+            self._busy_weight_vars[key].set(value)
+        self._busy_weights_cache = tuple(float(value.get()) for value in self._busy_weight_vars.values())
+        self._update_busy_formula_text()
         self._bound_device_id = self._load_bound_device_id()
         self._calibration = self._load_device_calibration(self._bound_device_id)
 
@@ -83,6 +96,7 @@ class WindowsDashboardApp:
             self._post_codex_snapshot,
             self._post_status,
             lambda: max(1, self._total_led_count.get() - 1),
+            lambda: self._busy_weights_cache,
         )
         self._codex_data_source.start()
         self._tray = TrayController(
@@ -282,15 +296,14 @@ class WindowsDashboardApp:
         task_actions.pack(fill=tk.X, pady=(4, 8))
         ttk.Button(task_actions, text="删除选中任务", command=self._delete_selected_tasks, style="Danger.TButton").pack(side=tk.RIGHT)
         ttk.Button(task_actions, text="删除已完成任务", command=self._delete_completed_tasks, style="Danger.TButton").pack(side=tk.RIGHT, padx=(0, 8))
-        ttk.Label(task_actions, text="第一个灯是系统状态灯，从第二个灯开始计数，灯位为 1；双击可编辑，拖动可调整灯位。", foreground="#777777").pack(side=tk.LEFT)
-        self._status_tree = ttk.Treeview(status_tab, columns=("pin", "led", "effect", "task", "state", "summary", "source"), show="tree headings", selectmode="none")
-        self._status_tree.heading("#0", text="选择 / 排序")
-        self._status_tree.column("#0", width=155, anchor=tk.W)
-        for key, title, width in (("pin", "固定", 64), ("led", "灯位", 60), ("effect", "当前灯效", 105), ("task", "任务", 190), ("state", "任务状态", 85), ("summary", "摘要", 260), ("source", "来源", 75)):
+        ttk.Label(task_actions, text="第一个灯是系统状态灯，从第二个灯开始计数，灯位为 1；任务信息只读，使用操作列选择、拖动或固定。", foreground="#777777").pack(side=tk.LEFT)
+        self._status_tree = ttk.Treeview(status_tab, columns=("led", "effect", "task", "state", "summary", "source"), show="tree headings", selectmode="none")
+        self._status_tree.heading("#0", text="🔷 操作")
+        self._status_tree.column("#0", width=185, anchor=tk.W)
+        for key, title, width in (("led", "灯位", 60), ("effect", "当前灯效", 105), ("task", "任务", 190), ("state", "任务状态", 85), ("summary", "摘要", 300), ("source", "来源", 75)):
             self._status_tree.heading(key, text=title)
             self._status_tree.column(key, width=width, anchor=tk.W)
         self._status_tree.pack(fill=tk.BOTH, expand=True)
-        self._status_tree.bind("<Double-1>", self._edit_selected_status_task)
         self._status_tree.bind("<ButtonPress-1>", self._begin_task_drag, add="+")
         self._status_tree.bind("<B1-Motion>", self._move_task_drag, add="+")
         self._status_tree.bind("<ButtonRelease-1>", self._finish_task_drag, add="+")
@@ -305,10 +318,20 @@ class WindowsDashboardApp:
         usage = ttk.LabelFrame(settings_tab, text="第一颗灯 · 系统用量", padding=12)
         usage.pack(fill=tk.X)
         self._add_scale(usage, "整体亮度", self._master_brightness, 0)
+        weight_row = ttk.Frame(usage)
+        weight_row.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+        ttk.Label(weight_row, text="繁忙度权重").pack(side=tk.LEFT, padx=(0, 8))
+        for key, title in (("task", "任务数"), ("token", "Token"), ("cpu", "CPU"), ("memory", "内存"), ("disk", "磁盘"), ("network", "网络")):
+            ttk.Label(weight_row, text=title).pack(side=tk.LEFT, padx=(8, 3))
+            field = ttk.Spinbox(weight_row, from_=0, to=100, width=4, textvariable=self._busy_weight_vars[key])
+            field.pack(side=tk.LEFT)
+            field.bind("<FocusOut>", self._busy_weights_changed)
+            field.bind("<Return>", self._busy_weights_changed)
+            ttk.Label(weight_row, text="%").pack(side=tk.LEFT)
         ttk.Label(
             usage,
-            text="颜色由绿到红表示余量；闪烁越快表示五小时或当天用量越高",
-        ).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+            textvariable=self._busy_formula_text,
+        ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
         usage.columnconfigure(1, weight=1)
 
         led_summary = ttk.LabelFrame(settings_tab, text="灯带", padding=12)
@@ -720,6 +743,42 @@ class WindowsDashboardApp:
         except (OSError, ValueError, TypeError):
             return None
 
+    def _load_busy_weights(self) -> dict[str, int]:
+        defaults = {"task": 30, "token": 20, "cpu": 20, "memory": 10, "disk": 10, "network": 10}
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+            stored = data.get("busy_weights", {})
+            return {key: max(0, min(100, int(stored.get(key, value)))) for key, value in defaults.items()}
+        except (OSError, ValueError, TypeError, AttributeError):
+            return defaults
+
+    def _update_busy_formula_text(self) -> None:
+        values = {key: max(0, min(100, int(value.get()))) for key, value in self._busy_weight_vars.items()}
+        total = sum(values.values())
+        self._busy_formula_text.set(
+            "颜色由绿到红表示总体余量；闪烁速度表示综合繁忙度："
+            f"任务数 {values['task']} + Token {values['token']} + CPU {values['cpu']} + 内存 {values['memory']} + "
+            f"磁盘 {values['disk']} + 网络 {values['network']}（合计 {total}，计算时自动归一化）。"
+        )
+
+    def _save_busy_weights(self) -> None:
+        values = {key: max(0, min(100, int(value.get()))) for key, value in self._busy_weight_vars.items()}
+        self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            data = {}
+        data["busy_weights"] = values
+        self._settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._busy_weights_cache = tuple(float(values[key]) for key in self._busy_weight_vars)
+        self._update_busy_formula_text()
+
+    def _busy_weights_changed(self, _event: object = None) -> None:
+        try:
+            self._save_busy_weights()
+        except (tk.TclError, ValueError):
+            return
+
     def _save_bound_device_id(self, device_id: str | None) -> None:
         self._settings_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -824,14 +883,13 @@ class WindowsDashboardApp:
             task_capacity = max(1, self._total_led_count.get() - 1)
             actual_position = position_by_task_id[str(record["task_id"])]
             led_position: object = actual_position if actual_position <= task_capacity else "未分配"
-            image = self._lamp_color_images.get(color)
-            if image is None:
-                image = tk.PhotoImage(width=14, height=14)
-                image.put(self._hex_color(color), to=(0, 0, 14, 14))
-                self._lamp_color_images[color] = image
             checked = "☑  已选" if str(record["task_id"]) in self._checked_task_ids else "☐  选择"
-            pin_text = "📌 已固定" if record.get("pinned") else "固定"
-            tree.insert("", tk.END, iid=iid, text=f"{checked}     ⠿", image=image, values=(pin_text, led_position, lamp_effect, record["title"], state, record["summary"], record["source"]))
+            pin_text = "📌 已固定" if record.get("pinned") else "○ 固定"
+            tree.insert(
+                "", tk.END, iid=iid,
+                text=f"{checked}    ⠿ 拖动    {pin_text}",
+                values=(led_position, lamp_effect, record["title"], state, record["summary"], record["source"]),
+            )
 
     def _begin_task_drag(self, event: tk.Event) -> str | None:
         tree = self._status_tree
@@ -844,7 +902,11 @@ class WindowsDashboardApp:
             return None
         column = tree.identify_column(event.x)
         task_id = self._status_task_ids.get(row)
-        if column == "#1" and task_id:
+        if column != "#0":
+            return None
+        bounds = tree.bbox(row, "#0")
+        relative_x = event.x - bounds[0] if bounds else 0
+        if relative_x >= 120 and task_id:
             record = self._status_records.get(row, {})
             # 固定前先把当前自动排序写入灯位，避免点击固定后任务跳到旧位置。
             current_order = [str(item["task_id"]) for item in self._event_store.latest_records(500)]
@@ -852,16 +914,14 @@ class WindowsDashboardApp:
             self._event_store.set_pinned(task_id, not bool(record.get("pinned")))
             self._refresh_status_page()
             return "break"
-        if column != "#0":
-            return None
-        bounds = tree.bbox(row, "#0")
-        relative_x = event.x - bounds[0] if bounds else 0
-        if relative_x < 108 and task_id:
+        if relative_x < 72 and task_id:
             if task_id in self._checked_task_ids:
                 self._checked_task_ids.remove(task_id)
             else:
                 self._checked_task_ids.add(task_id)
             self._refresh_status_page()
+            return "break"
+        if relative_x >= 120:
             return "break"
         self._drag_task_item = row
         tree.focus(row)
@@ -915,43 +975,6 @@ class WindowsDashboardApp:
         self._event_store.delete_tasks(task_ids)
         self._refresh_status_page()
         self._post_status(f"已永久删除 {len(task_ids)} 个已完成任务")
-
-    def _edit_selected_status_task(self, event: object = None) -> None:
-        tree = self._status_tree
-        if tree is None:
-            return
-        item_id = tree.identify_row(event.y) if isinstance(event, tk.Event) else tree.focus()
-        if not item_id:
-            return
-        task_id = self._status_task_ids.get(item_id)
-        if not task_id:
-            return
-        values = tree.item(item_id, "values")
-        dialog = tk.Toplevel(self.root)
-        dialog.title("编辑任务状态")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        content = ttk.Frame(dialog, padding=18)
-        content.pack(fill=tk.BOTH, expand=True)
-        title = tk.StringVar(value=values[3])
-        state = tk.StringVar(value=values[4])
-        summary = tk.StringVar(value=values[5])
-        for row, label in enumerate(("任务名称", "状态", "摘要")):
-            ttk.Label(content, text=label, width=10).grid(row=row, column=0, sticky=tk.W, pady=6)
-        ttk.Entry(content, textvariable=title, width=48).grid(row=0, column=1, sticky=tk.EW)
-        ttk.Combobox(content, textvariable=state, values=[item.chinese_name for item in TaskState], state="readonly").grid(row=1, column=1, sticky=tk.EW)
-        ttk.Entry(content, textvariable=summary).grid(row=2, column=1, sticky=tk.EW)
-        content.columnconfigure(1, weight=1)
-
-        def save() -> None:
-            state_value = next(item.name.lower() for item in TaskState if item.chinese_name == state.get())
-            previous = self._status_records.get(item_id, {})
-            self._event_store.record({"task_id": task_id, "title": title.get(), "state": state_value, "progress": previous.get("progress", 0), "summary": summary.get(), "source": "manual"})
-            self._refresh_status_page()
-            dialog.destroy()
-
-        ttk.Button(content, text="保存修改", command=save, style="Primary.TButton").grid(row=3, column=1, sticky=tk.E, pady=(16, 0))
-        self._fit_dialog(dialog, 560, 350, 480, 320)
 
     def _open_calibration(self) -> None:
         """为当前绑定灯板调整通道增益和伽马，并按唯一 ID 保存。"""

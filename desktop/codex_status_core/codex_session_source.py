@@ -82,14 +82,19 @@ class CodexSessionSource:
                 continue
             with path.open("rb") as stream:
                 stream.seek(offset)
-                for line in stream:
+                while True:
+                    line_offset = stream.tell()
+                    line = stream.readline()
+                    if not line:
+                        break
                     try:
-                        self._consume(self._thread_id(path), json.loads(line))
+                        event_key = f"{path.resolve()}:{line_offset}"
+                        self._consume(self._thread_id(path), json.loads(line), event_key)
                     except (json.JSONDecodeError, ValueError, TypeError):
                         continue
                 self._offsets[path] = stream.tell()
 
-    def _consume(self, thread_id: str, envelope: dict[str, Any]) -> None:
+    def _consume(self, thread_id: str, envelope: dict[str, Any], event_key: str | None = None) -> None:
         payload = envelope.get("payload") or {}
         envelope_type = envelope.get("type")
         event_type = payload.get("type")
@@ -100,6 +105,19 @@ class CodexSessionSource:
             message = " ".join(str(payload.get("message") or "").split())
             if message:
                 self._summaries[thread_id] = message[:240]
+            return
+        if envelope_type == "event_msg" and event_type == "token_count":
+            info = payload.get("info")
+            if isinstance(info, dict):
+                usage = info.get("total_token_usage") or {}
+                if isinstance(usage, dict):
+                    self._store.update_task_usage(
+                        task_id,
+                        int(usage.get("input_tokens") or 0),
+                        int(usage.get("output_tokens") or 0) + int(usage.get("reasoning_output_tokens") or 0),
+                        int(usage.get("total_tokens") or 0),
+                        int(info.get("model_context_window") or 0),
+                    )
             return
         state: str | None = None
         if envelope_type == "event_msg" and event_type == "task_started":
@@ -132,4 +150,5 @@ class CodexSessionSource:
             "state": state,
             "progress": 100 if state == "success" else 0,
             "source": "codex-live",
+            "event_key": event_key,
         })

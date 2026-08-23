@@ -5,11 +5,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codex_status_core.event_store import StatusEventStore
+from codex_status_core.event_data_source import weighted_busy_percent
 from codex_status_core.codex_session_source import CodexSessionSource
 from codex_status_core.hook_manager import HookProvider, install, status, uninstall
 
 
 class EventPipelineTests(unittest.TestCase):
+    def test_weighted_busy_formula(self) -> None:
+        self.assertEqual(weighted_busy_percent(100, 100, 100, 100, 100, 100), 100)
+        self.assertEqual(weighted_busy_percent(100, 0, 0, 0, 0, 0, (1, 0, 0, 0, 0, 0)), 100)
+
     def test_sqlite_snapshot_uses_latest_task_state(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             store = StatusEventStore(Path(folder) / "events.sqlite")
@@ -18,6 +23,15 @@ class EventPipelineTests(unittest.TestCase):
             snapshot = store.snapshot(2)
             self.assertEqual(snapshot.tasks[0].state.value, 3)
             self.assertEqual(len(snapshot.tasks), 2)
+
+    def test_event_key_prevents_replayed_codex_events(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            store = StatusEventStore(Path(folder) / "events.sqlite")
+            event = {"task_id": "same", "title": "同一任务", "state": "running", "event_key": "session:42"}
+            store.record(event)
+            store.record(event)
+            with store._connect() as database:
+                self.assertEqual(database.execute("SELECT COUNT(*) FROM task_events").fetchone()[0], 1)
 
     def test_hook_install_preserves_existing_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
@@ -56,9 +70,12 @@ class EventPipelineTests(unittest.TestCase):
             store.reorder_tasks(["three", "one", "two"])
             store.set_pinned("three", True)
             self.assertEqual([item["task_id"] for item in store.latest_records()], ["three", "one", "two"])
+            store.update_task_usage("one", 100, 20, 120, 1000)
             store.delete_tasks(["one"])
             self.assertEqual([item.title for item in store.snapshot(2).tasks], ["three", "two"])
             self.assertNotIn("one", [item["task_id"] for item in store.latest_records()])
+            with store._connect() as database:
+                self.assertEqual(database.execute("SELECT COUNT(*) FROM task_usage WHERE task_id='one'").fetchone()[0], 0)
 
     def test_codex_live_events_map_to_task_states_and_summary(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
