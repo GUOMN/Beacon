@@ -20,6 +20,9 @@ class BLEWorker:
         self._device_id = device_id
         self._connected = threading.Event()
         self._firmware_info = "读取中"
+        self._ota_progress = 0
+        self._ota_state = "idle"
+        self._ota_message = ""
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client: DashboardBLEClient | None = None
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
@@ -37,6 +40,9 @@ class BLEWorker:
         if self._loop is None or self._client is None or not self.is_connected:
             self._status_callback("灯板尚未连接，不能开始蓝牙升级")
             return
+        self._ota_progress = 0
+        self._ota_state = "running"
+        self._ota_message = "正在准备固件升级"
         future = asyncio.run_coroutine_threadsafe(self._client.submit_ota(firmware), self._loop)
         try:
             future.result(timeout=2)
@@ -60,6 +66,10 @@ class BLEWorker:
     def firmware_info(self) -> str:
         return self._firmware_info
 
+    @property
+    def ota_status(self) -> dict[str, object]:
+        return {"state": self._ota_state, "progress": self._ota_progress, "message": self._ota_message}
+
     def _handle_status(self, message: str) -> None:
         if message == "蓝牙已连接":
             self._connected.set()
@@ -67,6 +77,20 @@ class BLEWorker:
             self._connected.clear()
         elif message.startswith("固件信息："):
             self._firmware_info = message.removeprefix("固件信息：")
+        elif message.startswith("蓝牙升级写入 ") and message.endswith("%"):
+            try:
+                self._ota_progress = int(message.removeprefix("蓝牙升级写入 ").removesuffix("%"))
+            except ValueError:
+                pass
+            self._ota_state = "running"
+            self._ota_message = message
+        elif message.startswith("固件校验通过"):
+            self._ota_progress = 100
+            self._ota_state = "success"
+            self._ota_message = message
+        elif message.startswith("蓝牙异常：") and self._ota_state == "running":
+            self._ota_state = "error"
+            self._ota_message = message
         self._status_callback(message)
 
     def _thread_main(self) -> None:

@@ -111,6 +111,25 @@ def scan_devices() -> dict[str, object]:
     scan_status_devices(receive, lambda _message: None)
     if not done.wait(25):
         raise TimeoutError("蓝牙扫描超时")
+    # A connected BLE peripheral normally stops advertising, so an ordinary
+    # discovery pass cannot see the device that this process already owns.
+    # Keep the bound board visible in Device Manager and expose its live state.
+    bound_device_id = str(settings().get("bound_device_id") or "").upper()
+    if bound_device_id and not any(str(item.get("device_id", "")).upper() == bound_device_id for item in result):
+        connected = bool(_persistent_worker is not None and _persistent_worker.is_connected)
+        result.insert(0, {
+            "name": f"Codex-Light-{bound_device_id}",
+            "device_id": bound_device_id,
+            "address": "",
+            "rssi": None,
+            "connected": connected,
+        })
+    for item in result:
+        item.setdefault("connected", bool(
+            _persistent_worker is not None
+            and _persistent_worker.is_connected
+            and str(item.get("device_id", "")).upper() == bound_device_id
+        ))
     return {"devices": result}
 
 
@@ -254,33 +273,24 @@ def identify(payload: dict[str, object]) -> dict[str, object]:
 
 
 def ota(payload: dict[str, object]) -> dict[str, object]:
-    from codex_status_core.protocol import BLEProtocol
     firmware = base64.b64decode(str(payload.get("firmware_base64") or ""), validate=True)
     if not firmware:
         raise ValueError("固件为空")
-    device_id = str(settings().get("bound_device_id") or "")
-    async def send() -> None:
-        client = await _connected(device_id)
-        async with client:
-            characteristic = client.services.get_characteristic(BLEProtocol.OTA_UUID)
-            if characteristic is None:
-                raise RuntimeError("灯板固件不支持蓝牙 OTA")
-            chunk_size = max(16, min(240, int(getattr(characteristic, "max_write_without_response_size", 20)) - 1))
-            await client.write_gatt_char(BLEProtocol.OTA_UUID, BLEProtocol.encode_ota_start(len(firmware)), response=True)
-            try:
-                for offset in range(0, len(firmware), chunk_size):
-                    await client.write_gatt_char(BLEProtocol.OTA_UUID, BLEProtocol.encode_ota_data(firmware[offset:offset + chunk_size]), response=True)
-                await client.write_gatt_char(BLEProtocol.OTA_UUID, BLEProtocol.encode_ota_finish(), response=True)
-            except Exception:
-                await client.write_gatt_char(BLEProtocol.OTA_UUID, BLEProtocol.encode_ota_abort(), response=True)
-                raise
-    asyncio.run(send())
-    return {"ok": True, "bytes": len(firmware)}
+    if _persistent_worker is None or not _persistent_worker.is_connected:
+        raise RuntimeError("已绑定灯板当前未连接，不能开始固件升级")
+    _persistent_worker.submit_ota(firmware)
+    return {"ok": True, "bytes": len(firmware), **_persistent_worker.ota_status}
+
+
+def ota_progress() -> dict[str, object]:
+    if _persistent_worker is None:
+        return {"state": "error", "progress": 0, "message": "蓝牙后台未启动"}
+    return _persistent_worker.ota_status
 
 
 def main() -> int:
     command = sys.argv[1] if len(sys.argv) > 1 else "dashboard"
-    handlers = {"dashboard": lambda _p: dashboard(), "scan-devices": lambda _p: scan_devices(), "settings": lambda _p: settings(), "save-settings": save_settings, "manage-tasks": manage_tasks, "apply-device": apply_device, "identify": identify, "ota": ota}
+    handlers = {"dashboard": lambda _p: dashboard(), "scan-devices": lambda _p: scan_devices(), "settings": lambda _p: settings(), "save-settings": save_settings, "manage-tasks": manage_tasks, "apply-device": apply_device, "identify": identify, "ota": ota, "ota-progress": lambda _p: ota_progress()}
     if command == "serve":
         store = StatusEventStore()
         store.fail_interrupted_tasks()
