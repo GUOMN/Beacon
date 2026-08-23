@@ -2,6 +2,11 @@ name: Build macOS Universal DMG
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - ".github/workflows/build-macos-arm64.yml"
 
 permissions:
   contents: read
