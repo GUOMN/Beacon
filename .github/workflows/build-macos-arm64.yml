@@ -21,7 +21,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -33,6 +33,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r desktop/requirements.txt
           corepack enable
+          corepack prepare pnpm@10.28.1 --activate
           cd desktop/tauri_app
           pnpm install --frozen-lockfile
 
