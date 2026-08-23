@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::{io::{BufRead, BufReader, Write}, path::PathBuf, process::{Child, ChildStdin, ChildStdout, Command, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering}}};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use btleplug::api::{Central, CentralEvent, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType};
+use btleplug::api::{Central, CentralEvent, CentralState, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType};
 use btleplug::platform::{Adapter as BleAdapter, Manager as BleManager, Peripheral as BlePeripheral};
 use futures::stream::StreamExt;
 use tokio::sync::Mutex as AsyncMutex;
@@ -52,6 +52,7 @@ struct BridgeState(Arc<Mutex<Option<BridgeProcess>>>);
 
 #[derive(Clone)]
 struct NativeBleState {
+    adapter: Arc<AsyncMutex<Option<BleAdapter>>>,
     peripheral: Arc<AsyncMutex<Option<BlePeripheral>>>,
     write_lock: Arc<AsyncMutex<()>>,
     ota_progress: Arc<AsyncMutex<Value>>,
@@ -67,6 +68,7 @@ struct NativeBleState {
 impl NativeBleState {
     fn new() -> Self {
         Self {
+            adapter: Arc::new(AsyncMutex::new(None)),
             peripheral: Arc::new(AsyncMutex::new(None)),
             write_lock: Arc::new(AsyncMutex::new(())),
             ota_progress: Arc::new(AsyncMutex::new(serde_json::json!({
@@ -121,10 +123,39 @@ fn characteristic(peripheral: &BlePeripheral, uuid: &str) -> Result<Characterist
         .ok_or_else(|| "灯板固件缺少所需蓝牙服务".to_string())
 }
 
-async fn connect_peripheral(address: Option<&str>, device_id: Option<&str>) -> Result<BlePeripheral, String> {
+async fn wait_for_macos_adapter(adapter: &BleAdapter, deadline: tokio::time::Instant) -> Result<(), String> {
+    if !cfg!(target_os = "macos") { return Ok(()); }
+    loop {
+        let state = adapter.adapter_state().await
+            .map_err(|error| format!("读取蓝牙状态失败：{error}"))?;
+        if state == CentralState::PoweredOn { return Ok(()); }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("Mac 蓝牙尚未就绪，当前状态：{state:?}"));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn native_adapter(state: &NativeBleState) -> Result<BleAdapter, String> {
+    let mut held = state.adapter.lock().await;
+    if let Some(adapter) = held.as_ref() { return Ok(adapter.clone()); }
     let manager = BleManager::new().await.map_err(|error| format!("蓝牙初始化失败：{error}"))?;
-    let adapters = manager.adapters().await.map_err(|error| format!("读取蓝牙适配器失败：{error}"))?;
+    let adapter = manager.adapters().await
+        .map_err(|error| format!("读取蓝牙适配器失败：{error}"))?
+        .into_iter().next().ok_or("未找到可用的蓝牙适配器")?;
+    wait_for_macos_adapter(
+        &adapter,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+    ).await?;
+    *held = Some(adapter.clone());
+    Ok(adapter)
+}
+
+async fn connect_peripheral(state: &NativeBleState, address: Option<&str>, device_id: Option<&str>) -> Result<BlePeripheral, String> {
+    let adapters = vec![native_adapter(state).await?];
+    let ready_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     for adapter in &adapters {
+        wait_for_macos_adapter(adapter, ready_deadline).await?;
         adapter.start_scan(status_scan_filter()?).await.map_err(|error| format!("启动蓝牙扫描失败：{error}"))?;
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -257,6 +288,11 @@ async fn scan_macos_event_stream(
     // uninterrupted, unfiltered scan.
     let mut events = adapter.events().await
         .map_err(|error| format!("订阅蓝牙发现事件失败：{error}"))?;
+    // Apple requires all central commands to wait until CBCentralManager is
+    // powered on. btleplug returns after the first state callback (which can
+    // still be Unknown/Resetting during startup or permission transitions),
+    // so enforce the documented state gate here before scanning.
+    wait_for_macos_adapter(adapter, deadline).await?;
     adapter.start_scan(ScanFilter::default()).await
         .map_err(|error| format!("启动蓝牙扫描失败：{error}"))?;
 
@@ -391,11 +427,7 @@ async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, St
             }]}));
         }
     }
-    let manager = BleManager::new().await.map_err(|error| format!("蓝牙初始化失败：{error}"))?;
-    let adapters = manager.adapters().await.map_err(|error| format!("读取蓝牙适配器失败：{error}"))?;
-    if adapters.is_empty() {
-        return Err("未找到可用的蓝牙适配器".into());
-    }
+    let adapters = vec![native_adapter(ble.inner()).await?];
     let macos = cfg!(target_os = "macos");
     let started_at = tokio::time::Instant::now();
     let deadline = started_at
@@ -465,7 +497,7 @@ async fn identify_device(state: tauri::State<'_, NativeBleState>, address: Strin
         let held = state.peripheral.lock().await;
         match held.as_ref() {
             Some(item) if item.is_connected().await.unwrap_or(false) => (item.clone(), true),
-            _ => (connect_peripheral(Some(&address), None).await?, false),
+            _ => (connect_peripheral(state.inner(), Some(&address), None).await?, false),
         }
     };
     let control = characteristic(&peripheral, CONTROL_UUID)?;
@@ -527,7 +559,7 @@ async fn ota_start(
         let held = state.peripheral.lock().await;
         match held.as_ref() {
             Some(item) if item.is_connected().await.unwrap_or(false) => item.clone(),
-            _ => connect_peripheral(Some(&address), None).await?,
+            _ => connect_peripheral(state.inner(), Some(&address), None).await?,
         }
     };
     let ota = characteristic(&peripheral, OTA_UUID)?;
@@ -610,7 +642,7 @@ async fn native_apply(bridge: BridgeState, ble: NativeBleState, mut payload: Val
         let held = ble.peripheral.lock().await;
         match held.as_ref() {
             Some(item) if item.is_connected().await.unwrap_or(false) => item.clone(),
-            _ => connect_peripheral(None, Some(device_id)).await?,
+            _ => connect_peripheral(&ble, None, Some(device_id)).await?,
         }
     };
     let control = characteristic(&peripheral, CONTROL_UUID)?;
