@@ -23,6 +23,7 @@
 
 // WS2812 数据引脚：沿用工程 menuconfig 中的 GPIO 配置
 #define STATUS_DATA_GPIO                 CONFIG_WS2812_GPIO
+#define STATUS_SECONDARY_DATA_GPIO       10
 
 // 蓝牙名称前缀；程序会在后面自动加上芯片唯一短 ID
 #define STATUS_BLE_DEVICE_NAME_PREFIX    "Codex-Light-"

@@ -33,7 +33,12 @@ class CodexSessionSource:
         now = time.time()
         for path in self._session_files():
             # 最近会话回读尾部，应用重启后仍可恢复正在执行的任务；旧会话从末尾开始。
-            self._offsets[path] = 0 if now - path.stat().st_mtime < 300 else path.stat().st_size
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                # Codex 可能在 glob 完成后立刻归档或轮换会话文件。
+                continue
+            self._offsets[path] = 0 if now - stat.st_mtime < 300 else stat.st_size
         self.poll_once()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -73,25 +78,32 @@ class CodexSessionSource:
         for path in self._session_files():
             # 新创建的会话文件必须从头读取，否则会漏掉最前面的 task_started。
             offset = self._offsets.get(path, 0)
-            size = path.stat().st_size
+            try:
+                size = path.stat().st_size
+            except FileNotFoundError:
+                self._offsets.pop(path, None)
+                continue
             if size < offset:
                 offset = 0
             if size == offset:
                 self._offsets[path] = offset
                 continue
-            with path.open("rb") as stream:
-                stream.seek(offset)
-                while True:
-                    line_offset = stream.tell()
-                    line = stream.readline()
-                    if not line:
-                        break
-                    try:
-                        event_key = f"{path.resolve()}:{line_offset}"
-                        self._consume(self._thread_id(path), json.loads(line), event_key)
-                    except (json.JSONDecodeError, ValueError, TypeError):
-                        continue
-                self._offsets[path] = stream.tell()
+            try:
+                with path.open("rb") as stream:
+                    stream.seek(offset)
+                    while True:
+                        line_offset = stream.tell()
+                        line = stream.readline()
+                        if not line:
+                            break
+                        try:
+                            event_key = f"{path.resolve()}:{line_offset}"
+                            self._consume(self._thread_id(path), json.loads(line), event_key)
+                        except (json.JSONDecodeError, ValueError, TypeError):
+                            continue
+                    self._offsets[path] = stream.tell()
+            except FileNotFoundError:
+                self._offsets.pop(path, None)
 
     def _consume(self, thread_id: str, envelope: dict[str, Any], event_key: str | None = None) -> None:
         payload = envelope.get("payload") or {}

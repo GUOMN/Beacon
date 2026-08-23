@@ -60,6 +60,7 @@ static void delayed_restart_task(void *arg)
 #define PACKET_TYPE_PANEL_HEADER  0x07U
 #define PACKET_TYPE_LED_COUNT     0x08U
 #define PACKET_TYPE_SLEEP_TIMEOUT 0x09U
+#define PACKET_TYPE_CHANNEL_COUNT  0x0AU
 #define HEARTBEAT_PACKET_SIZE     4U
 #define SNAPSHOT_PACKET_SIZE      17U
 #define RAW_LED_PACKET_SIZE       12U
@@ -68,9 +69,11 @@ static void delayed_restart_task(void *arg)
 #define STATE_STYLE_PACKET_SIZE_EXTENDED 12U
 #define TASK_STATE_PACKET_SIZE_LEGACY 7U
 #define TASK_STATE_PACKET_SIZE_EXTENDED 9U
+#define TASK_STATE_PACKET_SIZE_TIMING 10U
 #define PANEL_HEADER_PACKET_SIZE  7U
 #define LED_COUNT_PACKET_SIZE     5U
 #define SLEEP_TIMEOUT_PACKET_SIZE 6U
+#define CHANNEL_COUNT_PACKET_SIZE 5U
 
 static esp_err_t save_sleep_timeout(uint16_t minutes)
 {
@@ -334,14 +337,22 @@ static int control_access(uint16_t conn_handle, uint16_t attr_handle,
         break;
     case PACKET_TYPE_TASK_STATE:
         if ((packet_len == TASK_STATE_PACKET_SIZE_LEGACY ||
-             packet_len == TASK_STATE_PACKET_SIZE_EXTENDED) &&
+             packet_len == TASK_STATE_PACKET_SIZE_EXTENDED ||
+             packet_len == TASK_STATE_PACKET_SIZE_TIMING) &&
             packet[4] < led_status_get_active_count() - 1U) {
-            const uint16_t period_ms = packet_len == TASK_STATE_PACKET_SIZE_EXTENDED
+            const uint16_t period_ms = packet_len >= TASK_STATE_PACKET_SIZE_EXTENDED
                                            ? ((uint16_t)packet[7] | ((uint16_t)packet[8] << 8))
                                            : 0U;
-            result = dashboard_status_set_with_period((uint8_t)(packet[4] + 1U),
-                                                      (panel_state_t)packet[5], packet[6],
-                                                      period_ms);
+            // 新包 byte 9：0=自动逐任务频率，1=手动状态级频率。
+            // 旧 9 字节包带显式周期，继续按手动模式解释，保持兼容。
+            const led_animation_timing_t timing_mode =
+                packet_len == TASK_STATE_PACKET_SIZE_TIMING
+                    ? (led_animation_timing_t)packet[9]
+                    : (period_ms == 0U ? LED_ANIMATION_TIMING_AUTO
+                                       : LED_ANIMATION_TIMING_MANUAL);
+            result = dashboard_status_set_with_timing(
+                (uint8_t)(packet[4] + 1U), (panel_state_t)packet[5], packet[6],
+                period_ms, timing_mode);
         }
         break;
     case PACKET_TYPE_LED_COUNT:
@@ -379,6 +390,25 @@ static int control_access(uint16_t conn_handle, uint16_t attr_handle,
                 s_sleep_timeout_minutes = minutes;
                 ESP_LOGI(TAG, "断连休眠等待时间已更新为 %u 分钟", minutes);
             }
+        }
+        break;
+    case PACKET_TYPE_CHANNEL_COUNT:
+        if (packet_len == CHANNEL_COUNT_PACKET_SIZE && packet[4] >= 1U && packet[4] <= 2U) {
+            nvs_handle_t handle;
+            result = nvs_open("status_panel", NVS_READWRITE, &handle);
+            if (result == ESP_OK) {
+                result = nvs_set_u8(handle, "channels", packet[4]);
+                if (result == ESP_OK) {
+                    result = nvs_commit(handle);
+                }
+                nvs_close(handle);
+            }
+            if (result == ESP_OK) {
+                result = led_status_set_channel_count(packet[4]);
+                ESP_LOGI(TAG, "灯带输出通道已更新为 %u", packet[4]);
+            }
+        } else {
+            result = ESP_ERR_INVALID_ARG;
         }
         break;
     case PACKET_TYPE_PANEL_HEADER:
@@ -455,6 +485,9 @@ static void start_advertising(void)
     const struct ble_gap_adv_params params = {
         .conn_mode = BLE_GAP_CONN_MODE_UND,
         .disc_mode = BLE_GAP_DISC_MODE_GEN,
+        // 100~150 ms 足以让桌面端快速发现，同时降低断连等待期间的射频占空比。
+        .itvl_min = BLE_GAP_ADV_ITVL_MS(100),
+        .itvl_max = BLE_GAP_ADV_ITVL_MS(150),
     };
     const int rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER,
                                      &params, gap_event, NULL);

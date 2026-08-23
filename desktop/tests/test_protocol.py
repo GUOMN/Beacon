@@ -51,13 +51,14 @@ class BLEProtocolTests(unittest.TestCase):
         self.assertEqual(len(BLEProtocol.encode_panel_header(1, snapshot)), 7)
         self.assertEqual(
             BLEProtocol.encode_task_state(2, 0, snapshot.tasks[0]),
-            bytes((0xC3, 1, 6, 2, 0, 0, 0, 0, 0)),
+            bytes((0xC3, 1, 6, 2, 0, 0, 0, 0, 0, 1)),
         )
-        active = TaskSlot("大任务", TaskState.RUNNING, 0, animation_period_ms=850)
+        active = TaskSlot("大任务", TaskState.RUNNING, 0, animation_period_ms=850, automatic_frequency=True)
         self.assertEqual(
-            BLEProtocol.encode_task_state(3, 1, active)[-2:],
-            bytes((850 & 0xFF, 850 >> 8)),
+            BLEProtocol.encode_task_state(3, 1, active)[-3:],
+            bytes((850 & 0xFF, 850 >> 8, 0)),
         )
+        self.assertEqual(len(BLEProtocol.encode_task_state(3, 1, active, include_timing_mode=False)), 9)
 
     def test_state_style_packet(self) -> None:
         self.assertEqual(

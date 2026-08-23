@@ -13,6 +13,12 @@ typedef enum {
     LED_EFFECT_BREATHE,
 } led_effect_t;
 
+// 动画计时语义：自动模式逐任务计算频率；手动模式使用状态级频率。
+typedef enum {
+    LED_ANIMATION_TIMING_AUTO = 0,
+    LED_ANIMATION_TIMING_MANUAL = 1,
+} led_animation_timing_t;
+
 // 单颗灯的完整状态；蓝牙和本地逻辑都使用这一个结构
 typedef struct {
     uint8_t red;
@@ -23,10 +29,15 @@ typedef struct {
     uint16_t period_ms;   // 闪烁或呼吸周期；常亮和关闭时忽略
     uint8_t blink_duty_percent; // 闪烁亮灯占空比 1~100；0 表示使用固件短脉冲默认值
     uint16_t phase_offset_ms; // 动画相位偏移，用于形成沿灯带移动的呼吸流水
+    led_animation_timing_t timing_mode; // 自动可逐灯变速；手动使用状态级周期
 } led_status_t;
 
 // 启动六灯渲染任务
-esp_err_t led_status_start(led_strip_handle_t strip);
+esp_err_t led_status_start(led_strip_handle_t primary_strip,
+                           led_strip_handle_t secondary_strip,
+                           uint8_t channel_count);
+esp_err_t led_status_set_channel_count(uint8_t channel_count);
+uint8_t led_status_get_channel_count(void);
 
 // 设置或读取指定灯珠的状态，灯珠编号为 0~5
 esp_err_t led_status_set(uint8_t index, const led_status_t *status);

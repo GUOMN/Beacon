@@ -26,6 +26,7 @@ class DashboardBLEClient:
         self._connected_client: BleakClient | None = None
         self._device_id = device_id.upper() if device_id else None
         self._firmware_info = ""
+        self._latest_snapshot: DashboardSnapshot | None = None
         self._ota_previous_info = ""
         self._ota_waiting_verification = False
 
@@ -51,6 +52,7 @@ class DashboardBLEClient:
 
     async def submit(self, snapshot: DashboardSnapshot) -> None:
         # 队列只保留最新状态，避免断连后发送过时的中间状态。
+        self._latest_snapshot = snapshot
         if self._outgoing.full():
             with suppress(asyncio.QueueEmpty):
                 self._outgoing.get_nowait()
@@ -84,6 +86,11 @@ class DashboardBLEClient:
         async with BleakClient(device, disconnected_callback=on_disconnect) as client:
             self._connected_client = client
             self._status_callback("蓝牙已连接")
+            if self._latest_snapshot is not None:
+                if self._outgoing.full():
+                    with suppress(asyncio.QueueEmpty):
+                        self._outgoing.get_nowait()
+                await self._outgoing.put(self._latest_snapshot)
             try:
                 raw_info = await client.read_gatt_char(BLEProtocol.INFO_UUID)
                 new_info = bytes(raw_info).decode("utf-8", errors="replace")
@@ -124,6 +131,7 @@ class DashboardBLEClient:
                 await self._write_snapshot(client, snapshot)
 
     async def _write_snapshot(self, client: BleakClient, snapshot: DashboardSnapshot) -> None:
+            timing_mode_supported = self._supports_task_timing_mode()
             self._sequence = (self._sequence + 1) & 0xFF
             await client.write_gatt_char(
                 BLEProtocol.CONTROL_UUID,
@@ -136,6 +144,21 @@ class DashboardBLEClient:
                 BLEProtocol.encode_sleep_timeout(self._sequence, snapshot.sleep_timeout_minutes),
                 response=True,
             )
+            self._sequence = (self._sequence + 1) & 0xFF
+            try:
+                await client.write_gatt_char(
+                    BLEProtocol.CONTROL_UUID,
+                    BLEProtocol.encode_channel_count(self._sequence, snapshot.output_channels),
+                    response=True,
+                )
+            except Exception as exc:
+                # Channel selection was added after the first OTA-capable firmware.
+                # A legacy board already operates as one GPIO8 channel, so keep the
+                # rest of the configuration compatible instead of aborting it all.
+                if snapshot.output_channels != 1:
+                    raise RuntimeError(
+                        "当前灯板固件不支持双通道，请先升级固件"
+                    ) from exc
             for state, style in snapshot.state_styles.items():
                 self._sequence = (self._sequence + 1) & 0xFF
                 await client.write_gatt_char(
@@ -156,9 +179,21 @@ class DashboardBLEClient:
                 self._sequence = (self._sequence + 1) & 0xFF
                 await client.write_gatt_char(
                     BLEProtocol.CONTROL_UUID,
-                    BLEProtocol.encode_task_state(self._sequence, task_index, task),
+                    BLEProtocol.encode_task_state(
+                        self._sequence, task_index, task,
+                        include_timing_mode=timing_mode_supported,
+                    ),
                     response=True,
                 )
+
+    def _supports_task_timing_mode(self) -> bool:
+        """0.2.1 起支持任务包的第十字节；旧固件继续接收兼容的九字节包。"""
+        try:
+            version = self._firmware_info.split("|", 1)[0].lstrip("vV")
+            parts = tuple(int(part) for part in version.split(".")[:3])
+            return parts >= (0, 2, 1)
+        except (AttributeError, TypeError, ValueError):
+            return False
 
     async def _ota_loop(self, client: BleakClient) -> None:
         while True:

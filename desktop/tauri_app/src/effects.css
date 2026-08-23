@@ -1,0 +1,8 @@
+.effect-list .effect {
+  grid-template-columns: 38px 74px 86px 1fr 1fr 110px;
+  gap: 9px;
+}
+.effect input[type="color"] { width:30px; height:30px; padding:2px; border:1px solid #dddfe3; border-radius:7px; background:white; }
+.effect label { display:flex; align-items:center; gap:5px; color:#777; }
+.effect label input[type="number"] { width:58px; padding:5px; border:1px solid #dddfe3; border-radius:6px; }
+.effect label input[type="checkbox"] { accent-color:#34383e; }

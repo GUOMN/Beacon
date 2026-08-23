@@ -37,6 +37,9 @@ class BridgeSnapshot:
     busy_percent: int
     task_load_percent: int = 0
     token_load_percent: int = 0
+    cpu_available_percent: int = 100
+    memory_available_percent: int = 100
+    disk_available_percent: int = 100
 
 
 class StatusEventStore:
@@ -200,6 +203,20 @@ class StatusEventStore:
                 (task_id, 1 if pinned else 0),
             )
 
+    def assign_task_to_slot(self, task_id: str, slot: int) -> None:
+        """Pin one task to a visible LED slot and release the previous occupant."""
+        slot = max(0, int(slot))
+        with self._connect() as database:
+            database.execute(
+                "UPDATE task_layout SET pinned=0 WHERE display_order=? AND task_id<>?",
+                (slot, task_id),
+            )
+            database.execute(
+                """INSERT INTO task_layout(task_id,display_order,hidden,pinned) VALUES(?,?,0,1)
+                   ON CONFLICT(task_id) DO UPDATE SET display_order=excluded.display_order,pinned=1""",
+                (task_id, slot),
+            )
+
     def delete_tasks(self, task_ids: list[str]) -> None:
         """物理删除任务及全部历史事件；调用方应明确提示不可恢复。"""
         with self._connect() as database:
@@ -268,6 +285,7 @@ class StatusEventStore:
                 state=STATE_NAMES[str(row["state"])],
                 progress=int(row["progress"]),
                 animation_period_ms=max(500, min(3200, round(3200 - workload * 27))),
+                automatic_frequency=True,
             ))
         while len(tasks) < task_limit:
             tasks.append(TaskSlot(title=f"任务 {len(tasks) + 1}", state=TaskState.IDLE))

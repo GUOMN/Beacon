@@ -11,7 +11,9 @@
 #include "freertos/task.h"
 
 static const char *TAG = "led_status";
-static led_strip_handle_t s_strip;
+static led_strip_handle_t s_strips[2];
+static uint8_t s_channel_count = 1U;
+static bool s_force_refresh = true;
 static SemaphoreHandle_t s_status_mutex;
 static led_status_t s_status[STATUS_LED_MAX_COUNT];
 static uint8_t s_master_brightness_percent = 100U;
@@ -54,6 +56,9 @@ static void render_task(void *argument)
 {
     (void)argument;
     led_status_t snapshot[STATUS_LED_MAX_COUNT];
+    uint8_t previous_rgb[STATUS_LED_MAX_COUNT][3] = {0};
+    bool first_frame = true;
+    TickType_t last_wake_tick = xTaskGetTickCount();
 
     while (true) {
         xSemaphoreTake(s_status_mutex, portMAX_DELAY);
@@ -64,26 +69,50 @@ static void render_task(void *argument)
         xSemaphoreGive(s_status_mutex);
 
         const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        const bool force_refresh = s_force_refresh;
+        s_force_refresh = false;
+        bool frame_changed = first_frame || force_refresh;
         for (uint8_t i = 0; i < active_count; ++i) {
             const float scale = effect_scale(&snapshot[i], now_ms);
-            ESP_ERROR_CHECK(led_strip_set_pixel(
-                s_strip,
-                i,
-                scale_channel(snapshot[i].red, snapshot[i].brightness, scale),
-                scale_channel(snapshot[i].green, snapshot[i].brightness, scale),
-                scale_channel(snapshot[i].blue, snapshot[i].brightness, scale)));
+            const uint8_t red = scale_channel(snapshot[i].red, snapshot[i].brightness, scale);
+            const uint8_t green = scale_channel(snapshot[i].green, snapshot[i].brightness, scale);
+            const uint8_t blue = scale_channel(snapshot[i].blue, snapshot[i].brightness, scale);
+            if (first_frame || force_refresh || red != previous_rgb[i][0] || green != previous_rgb[i][1] ||
+                blue != previous_rgb[i][2]) {
+                for (uint8_t channel = 0; channel < s_channel_count; ++channel) {
+                    ESP_ERROR_CHECK(led_strip_set_pixel(s_strips[channel], i, red, green, blue));
+                }
+                previous_rgb[i][0] = red;
+                previous_rgb[i][1] = green;
+                previous_rgb[i][2] = blue;
+                frame_changed = true;
+            }
         }
-        ESP_ERROR_CHECK(led_strip_refresh(s_strip));
-        vTaskDelay(pdMS_TO_TICKS(STATUS_FRAME_MS));
+        // 常亮、熄灭以及闪烁平台期不重复启动 RMT，减少 CPU 唤醒和外设活动。
+        if (frame_changed) {
+            for (uint8_t channel = 0; channel < s_channel_count; ++channel) {
+                ESP_ERROR_CHECK(led_strip_refresh(s_strips[channel]));
+            }
+            first_frame = false;
+        }
+        vTaskDelayUntil(&last_wake_tick, pdMS_TO_TICKS(STATUS_FRAME_MS));
     }
 }
 
-esp_err_t led_status_start(led_strip_handle_t strip)
+esp_err_t led_status_start(led_strip_handle_t primary_strip,
+                           led_strip_handle_t secondary_strip,
+                           uint8_t channel_count)
 {
-    ESP_RETURN_ON_FALSE(strip != NULL, ESP_ERR_INVALID_ARG, TAG, "灯带句柄为空");
+    ESP_RETURN_ON_FALSE(primary_strip != NULL && secondary_strip != NULL,
+                        ESP_ERR_INVALID_ARG, TAG, "灯带句柄为空");
+    ESP_RETURN_ON_FALSE(channel_count >= 1U && channel_count <= 2U,
+                        ESP_ERR_INVALID_ARG, TAG, "灯带通道数无效");
     ESP_RETURN_ON_FALSE(s_status_mutex == NULL, ESP_ERR_INVALID_STATE, TAG, "显示任务已启动");
 
-    s_strip = strip;
+    s_strips[0] = primary_strip;
+    s_strips[1] = secondary_strip;
+    s_channel_count = channel_count;
+    s_force_refresh = true;
     s_status_mutex = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_status_mutex != NULL, ESP_ERR_NO_MEM, TAG, "无法创建状态锁");
 
@@ -105,6 +134,29 @@ esp_err_t led_status_start(led_strip_handle_t strip)
     return ESP_OK;
 }
 
+esp_err_t led_status_set_channel_count(uint8_t channel_count)
+{
+    ESP_RETURN_ON_FALSE(channel_count >= 1U && channel_count <= 2U,
+                        ESP_ERR_INVALID_ARG, TAG, "灯带通道数无效");
+    if (s_status_mutex != NULL) {
+        xSemaphoreTake(s_status_mutex, portMAX_DELAY);
+    }
+    const uint8_t previous = s_channel_count;
+    s_channel_count = channel_count;
+    if (s_status_mutex != NULL) {
+        xSemaphoreGive(s_status_mutex);
+    }
+    if (previous == 2U && channel_count == 1U && s_strips[1] != NULL) {
+        ESP_ERROR_CHECK(led_strip_clear(s_strips[1]));
+    }
+    return ESP_OK;
+}
+
+uint8_t led_status_get_channel_count(void)
+{
+    return s_channel_count;
+}
+
 esp_err_t led_status_set(uint8_t index, const led_status_t *status)
 {
     ESP_RETURN_ON_FALSE(s_status_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "显示任务未启动");
@@ -114,6 +166,8 @@ esp_err_t led_status_set(uint8_t index, const led_status_t *status)
                         ESP_ERR_INVALID_ARG, TAG, "显示效果无效");
     ESP_RETURN_ON_FALSE(status->blink_duty_percent <= 100U,
                         ESP_ERR_INVALID_ARG, TAG, "闪烁占空比无效");
+    ESP_RETURN_ON_FALSE(status->timing_mode <= LED_ANIMATION_TIMING_MANUAL,
+                        ESP_ERR_INVALID_ARG, TAG, "动画计时模式无效");
 
     xSemaphoreTake(s_status_mutex, portMAX_DELAY);
     s_status[index] = *status;

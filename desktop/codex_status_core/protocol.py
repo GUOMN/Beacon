@@ -47,14 +47,17 @@ class BLEProtocol:
                       snapshot.period_used_percent, snapshot.master_brightness_percent))
 
     @classmethod
-    def encode_task_state(cls, sequence: int, task_index: int, task: object) -> bytes:
+    def encode_task_state(
+        cls, sequence: int, task_index: int, task: object, *, include_timing_mode: bool = True
+    ) -> bytes:
         if not 0 <= task_index <= 62:
             raise ValueError("任务索引必须在 0~62 之间")
         task.validate()
-        return bytes((0xC3, 1, 6, sequence & 0xFF, task_index,
-                      int(task.state), task.progress,
-                      task.animation_period_ms & 0xFF,
-                      (task.animation_period_ms >> 8) & 0xFF))
+        packet = bytes((0xC3, 1, 6, sequence & 0xFF, task_index,
+                        int(task.state), task.progress,
+                        task.animation_period_ms & 0xFF,
+                        (task.animation_period_ms >> 8) & 0xFF))
+        return packet + bytes((0 if task.automatic_frequency else 1,)) if include_timing_mode else packet
 
     @classmethod
     def encode_led_count(cls, sequence: int, total_count: int) -> bytes:
@@ -68,6 +71,13 @@ class BLEProtocol:
         if not 1 <= minutes <= 1440:
             raise ValueError("断连休眠时间必须在 1~1440 分钟之间")
         return bytes((0xC3, 1, 9, sequence & 0xFF, minutes & 0xFF, minutes >> 8))
+
+    @classmethod
+    def encode_channel_count(cls, sequence: int, channels: int) -> bytes:
+        """配置 GPIO8 单通道或 GPIO8+GPIO10 双通道输出。"""
+        if channels not in (1, 2):
+            raise ValueError("灯带通道数必须是 1 或 2")
+        return bytes((0xC3, 1, 10, sequence & 0xFF, channels))
     SERVICE_UUID = "0100c310-7625-819e-934c-32b8e4177d6a"
     CONTROL_UUID = "0200c310-7625-819e-934c-32b8e4177d6a"
     OTA_UUID = "0300c310-7625-819e-934c-32b8e4177d6a"

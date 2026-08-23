@@ -33,6 +33,11 @@ esp_err_t dashboard_status_load_saved_styles(void);
 esp_err_t dashboard_status_set(uint8_t led_index, panel_state_t state, uint8_t progress);
 esp_err_t dashboard_status_set_with_period(uint8_t led_index, panel_state_t state,
                                            uint8_t progress, uint16_t period_ms);
+// 设置任务灯动画计时方式。自动模式忽略 period_ms，由固件逐任务计算；
+// 手动模式使用上位机传入的状态级 period_ms。
+esp_err_t dashboard_status_set_with_timing(uint8_t led_index, panel_state_t state,
+                                           uint8_t progress, uint16_t period_ms,
+                                           led_animation_timing_t timing_mode);
 
 // 第一颗灯：颜色表示剩余百分比，呼吸速度表示短周期已用百分比
 esp_err_t dashboard_status_set_usage(uint8_t remaining_percent,

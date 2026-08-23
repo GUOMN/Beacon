@@ -13,6 +13,10 @@ desktop/.venv/
 desktop/**/__pycache__/
 desktop/build/
 desktop/dist/
+desktop/tauri_app/node_modules/
+desktop/tauri_app/dist/
+desktop/tauri_app/src-tauri/target/
+desktop/tauri_app/tsconfig.tsbuildinfo
 artifacts/
 dist/
 *.pyc

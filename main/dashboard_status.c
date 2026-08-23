@@ -136,15 +136,37 @@ esp_err_t dashboard_status_set(uint8_t led_index, panel_state_t state, uint8_t p
 esp_err_t dashboard_status_set_with_period(uint8_t led_index, panel_state_t state,
                                            uint8_t progress, uint16_t period_ms)
 {
+    // 兼容旧版扩展包：显式给周期视为手动，0 则沿用自动策略。
+    return dashboard_status_set_with_timing(
+        led_index, state, progress, period_ms,
+        period_ms == 0U ? LED_ANIMATION_TIMING_AUTO
+                        : LED_ANIMATION_TIMING_MANUAL);
+}
+
+esp_err_t dashboard_status_set_with_timing(uint8_t led_index, panel_state_t state,
+                                           uint8_t progress, uint16_t period_ms,
+                                           led_animation_timing_t timing_mode)
+{
     ESP_RETURN_ON_FALSE(led_index < led_status_get_active_count(),
                         ESP_ERR_INVALID_ARG, "dashboard", "灯珠编号无效");
     ESP_RETURN_ON_FALSE(state <= PANEL_STATE_ERROR && progress <= 100U,
                         ESP_ERR_INVALID_ARG, "dashboard", "状态或进度无效");
+    ESP_RETURN_ON_FALSE(timing_mode <= LED_ANIMATION_TIMING_MANUAL,
+                        ESP_ERR_INVALID_ARG, "dashboard", "动画计时模式无效");
     led_status_t led = semantic_to_led(state, progress);
-    if (period_ms != 0U && led.effect != LED_EFFECT_SOLID && led.effect != LED_EFFECT_OFF) {
+    led.timing_mode = timing_mode;
+    if (timing_mode == LED_ANIMATION_TIMING_MANUAL &&
+        led.effect != LED_EFFECT_SOLID && led.effect != LED_EFFECT_OFF) {
         ESP_RETURN_ON_FALSE(period_ms >= 200U && period_ms <= 10000U,
                             ESP_ERR_INVALID_ARG, "dashboard", "任务动画周期超出范围");
         led.period_ms = period_ms;
+    } else if (timing_mode == LED_ANIMATION_TIMING_AUTO &&
+               led.effect != LED_EFFECT_SOLID && led.effect != LED_EFFECT_OFF) {
+        // 自动模式按任务进度与灯位生成稳定但彼此独立的频率。
+        // 进度越高动画越快；灯位扰动避免多个进行中任务机械同频。
+        const uint16_t progress_period_ms = (uint16_t)(2200U - progress * 12U);
+        led.period_ms = (uint16_t)(progress_period_ms + (led_index * 173U) % 431U);
+        led.phase_offset_ms = 0U;
     }
     return led_status_set(led_index, &led);
 }

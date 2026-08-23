@@ -1,4 +1,4 @@
-name: Build macOS ARM64 test package
+name: Build macOS ARM64 DMG
 
 on:
   workflow_dispatch:
@@ -9,9 +9,6 @@ permissions:
 jobs:
   build:
     runs-on: macos-14
-    defaults:
-      run:
-        working-directory: desktop
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -21,30 +18,39 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Confirm native architecture
-        run: |
-          test "$(uname -m)" = "arm64"
-          python -c "import platform; assert platform.machine() == 'arm64'"
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-      - name: Install packaging dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install desktop dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r desktop/requirements.txt
+          corepack enable
+          cd desktop/tauri_app
+          pnpm install --frozen-lockfile
 
       - name: Run shared tests
+        working-directory: desktop
         run: python -m unittest discover -s tests -v
 
-      - name: Build unsigned application
-        run: pyinstaller --clean --noconfirm CodexStatusBridge-macOS-arm64.spec
+      - name: Build ARM64 DMG
+        working-directory: desktop/tauri_app
+        run: pnpm tauri build --target aarch64-apple-darwin --bundles dmg
 
       - name: Verify ARM64 executable
-        run: file "dist/Codex Status Bridge.app/Contents/MacOS/CodexStatusBridge" | grep -q arm64
+        run: file "desktop/tauri_app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Codex Status Bridge.app/Contents/MacOS/codex-status-bridge" | grep -q arm64
 
-      - name: Package application
-        run: ditto -c -k --sequesterRsrc --keepParent "dist/Codex Status Bridge.app" "dist/CodexStatusBridge-macOS-arm64-test.zip"
-
-      - name: Upload temporary build artifact
+      - name: Upload temporary DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexStatusBridge-macOS-arm64-test
-          path: desktop/dist/CodexStatusBridge-macOS-arm64-test.zip
+          name: CodexStatusBridge-macOS-arm64-DMG
+          path: desktop/tauri_app/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
           retention-days: 14

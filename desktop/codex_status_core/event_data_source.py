@@ -106,6 +106,9 @@ class EventDataSource:
                         snapshot.token_load_percent,
                         self._busy_weights(),
                     ),
+                    cpu_available_percent=round(100 - cpu),
+                    memory_available_percent=round(100 - memory),
+                    disk_available_percent=round(100 - disk),
                 )
                 signature = (
                     snapshot.busy_percent,

@@ -46,6 +46,13 @@ class WindowsDashboardApp:
             "network": tk.IntVar(value=10),
         }
         self._busy_formula_text = tk.StringVar()
+        self._system_color_source = tk.StringVar(value=self._load_system_color_source())
+        self._latest_resource_availability = {
+            "CPU 可用程度": 100,
+            "内存可用程度": 100,
+            "磁盘可用程度": 100,
+            "账号余量": 100,
+        }
         self._total_led_count = tk.IntVar(value=6)
         self._total_led_text = tk.StringVar(value="总灯数：6")
         self._sleep_timeout_minutes = tk.IntVar(value=self._load_sleep_timeout_minutes())
@@ -71,6 +78,7 @@ class WindowsDashboardApp:
         self._style_colors: dict[TaskState, tuple[int, int, int]] = {}
         self._style_effects: dict[TaskState, tk.StringVar] = {}
         self._style_frequencies: dict[TaskState, tk.IntVar] = {}
+        self._style_auto_frequency: dict[TaskState, tk.BooleanVar] = {}
         self._style_duties: dict[TaskState, tk.IntVar] = {}
         self._style_buttons: dict[TaskState, ttk.Button] = {}
         self._style_previews: dict[TaskState, tk.Label] = {}
@@ -120,6 +128,16 @@ class WindowsDashboardApp:
         style.configure(".", font=("Microsoft YaHei UI", 10))
         style.configure("TFrame", background="#F7F7F7")
         style.configure("TLabel", background="#F7F7F7", foreground="#252525")
+        style.configure("Modern.TNotebook", background="#F7F7F7", borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure(
+            "Modern.TNotebook.Tab", background="#F7F7F7", foreground="#737A86",
+            borderwidth=0, padding=(22, 11), font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        style.map(
+            "Modern.TNotebook.Tab",
+            background=[("selected", "#FFFFFF"), ("active", "#F1F4F8")],
+            foreground=[("selected", "#2563EB"), ("active", "#344054")],
+        )
         style.configure("Settings.TFrame", background="#F3F3F1")
         style.configure("Card.TFrame", background="#FAFAF8")
         style.configure(
@@ -267,24 +285,25 @@ class WindowsDashboardApp:
         )
         style.map("Treeview", background=[("selected", "#E2E2E2")], foreground=[("selected", "#202020")])
 
-        outer = ttk.Frame(self.root, padding=18)
+        outer = ttk.Frame(self.root, padding=(24, 18, 24, 20))
         outer.pack(fill=tk.BOTH, expand=True)
 
         top_bar = ttk.Frame(outer)
         top_bar.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(top_bar, text="Codex Status Bridge", font=("Microsoft YaHei UI", 15, "bold"), foreground="#101828").pack(side=tk.LEFT)
         ttk.Label(
             top_bar,
             textvariable=self._status,
-            font=("Microsoft YaHei UI", 15, "bold"),
-            foreground="#252525",
-        ).pack(side=tk.LEFT, anchor=tk.W)
+            font=("Microsoft YaHei UI", 10, "bold"),
+            foreground="#168A52",
+        ).pack(side=tk.RIGHT, anchor=tk.E)
 
-        notebook = ttk.Notebook(outer)
+        notebook = ttk.Notebook(outer, style="Modern.TNotebook")
         notebook.pack(fill=tk.BOTH, expand=True)
         status_tab = ttk.Frame(notebook, padding=16)
         settings_tab = ttk.Frame(notebook)
         notebook.add(status_tab, text="任务面板")
-        notebook.add(settings_tab, text="设置")
+        notebook.add(settings_tab, text="配置")
 
         metrics = ttk.Frame(status_tab)
         metrics.pack(fill=tk.X, pady=(0, 14))
@@ -402,12 +421,16 @@ class WindowsDashboardApp:
             side=tk.RIGHT, padx=(0, 8)
         )
 
+        global_section = collapsible_section("全局灯带")
+        global_card = ttk.LabelFrame(global_section, text="整体亮度", padding=12)
+        global_card.pack(fill=tk.X)
+        self._add_scale(global_card, "所有灯光亮度", self._master_brightness, 0)
+
         usage_section = collapsible_section("第一颗灯 · 系统用量")
-        usage = ttk.LabelFrame(usage_section, text="系统繁忙度与亮度", padding=12)
+        usage = ttk.LabelFrame(usage_section, text="闪烁频率与颜色来源", padding=12)
         usage.pack(fill=tk.X)
-        self._add_scale(usage, "整体亮度", self._master_brightness, 0)
         weight_row = ttk.Frame(usage)
-        weight_row.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+        weight_row.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
         ttk.Label(weight_row, text="繁忙度权重").pack(side=tk.LEFT, padx=(0, 8))
         for key, title in (("task", "任务数"), ("token", "Token"), ("cpu", "CPU"), ("memory", "内存"), ("disk", "磁盘"), ("network", "网络")):
             ttk.Label(weight_row, text=title).pack(side=tk.LEFT, padx=(8, 3))
@@ -419,7 +442,18 @@ class WindowsDashboardApp:
         ttk.Label(
             usage,
             textvariable=self._busy_formula_text,
-        ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+        ).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(8, 12))
+        color_row = ttk.Frame(usage)
+        color_row.grid(row=2, column=0, columnspan=3, sticky=tk.W)
+        ttk.Label(color_row, text="颜色指标来源").pack(side=tk.LEFT, padx=(0, 10))
+        color_source = ttk.Combobox(
+            color_row, textvariable=self._system_color_source,
+            values=("CPU 可用程度", "内存可用程度", "磁盘可用程度", "账号余量"),
+            state="readonly", width=18,
+        )
+        color_source.pack(side=tk.LEFT)
+        color_source.bind("<<ComboboxSelected>>", self._system_color_source_changed)
+        ttk.Label(color_row, text="绿色表示最可用，随可用程度降低平滑过渡到红色", foreground="#667085").pack(side=tk.LEFT, padx=(12, 0))
         usage.columnconfigure(1, weight=1)
 
         led_section = collapsible_section("灯带")
@@ -441,6 +475,7 @@ class WindowsDashboardApp:
             TaskState.WARNING: ((255, 80, 0), "呼吸", 67, 15),
             TaskState.FAILURE: ((255, 0, 0), "常亮", 50, 15),
         }
+        automatic_states = self._load_auto_frequency_states()
         for row, (state, (color, effect_name, frequency, duty)) in enumerate(defaults.items()):
             self._style_colors[state] = color
             effect_var = tk.StringVar(value=effect_name)
@@ -449,6 +484,8 @@ class WindowsDashboardApp:
             duty_var = tk.IntVar(value=duty)
             self._style_frequencies[state] = frequency_var
             self._style_duties[state] = duty_var
+            auto_var = tk.BooleanVar(value=state.name in automatic_states)
+            self._style_auto_frequency[state] = auto_var
             ttk.Label(themes, text=state.chinese_name, width=10).grid(row=row, column=0, sticky=tk.W, pady=3)
             preview = tk.Label(
                 themes, width=7, height=1, relief=tk.SOLID, borderwidth=1,
@@ -468,22 +505,26 @@ class WindowsDashboardApp:
                 state="readonly", width=9,
             )
             effect_input.grid(row=row, column=3)
+            auto_input = ttk.Checkbutton(themes, text="自动", variable=auto_var)
+            auto_input.grid(row=row, column=4, padx=(8, 2))
             frequency_input = ttk.Spinbox(
                 themes, from_=6, to=300, textvariable=frequency_var, width=6,
             )
-            frequency_input.grid(row=row, column=4, padx=(8, 2))
+            frequency_input.grid(row=row, column=5, padx=(8, 2))
             frequency_label = ttk.Label(themes, text="次/分")
-            frequency_label.grid(row=row, column=5, sticky=tk.W)
+            frequency_label.grid(row=row, column=6, sticky=tk.W)
             duty_input = ttk.Spinbox(
                 themes, from_=1, to=100, textvariable=duty_var, width=5,
             )
-            duty_input.grid(row=row, column=6, padx=(8, 2))
+            duty_input.grid(row=row, column=7, padx=(8, 2))
             duty_label = ttk.Label(themes, text="占空比 %")
-            duty_label.grid(row=row, column=7, sticky=tk.W)
+            duty_label.grid(row=row, column=8, sticky=tk.W)
 
             def update_timing_inputs(
                 _event: object = None,
                 selected_effect: tk.StringVar = effect_var,
+                automatic: tk.BooleanVar = auto_var,
+                automatic_widget: ttk.Checkbutton = auto_input,
                 frequency_widget: ttk.Spinbox = frequency_input,
                 frequency_text: ttk.Label = frequency_label,
                 duty_widget: ttk.Spinbox = duty_input,
@@ -491,25 +532,30 @@ class WindowsDashboardApp:
             ) -> None:
                 effect_name = selected_effect.get()
                 if effect_name == "常亮":
+                    automatic_widget.grid_remove()
                     frequency_widget.grid_remove()
                     frequency_text.grid_remove()
                     duty_widget.grid_remove()
                     duty_text.grid_remove()
                 elif effect_name == "呼吸":
+                    automatic_widget.grid()
                     frequency_widget.grid()
                     frequency_text.grid()
                     duty_widget.grid_remove()
                     duty_text.grid_remove()
                 else:
+                    automatic_widget.grid()
                     frequency_widget.grid()
                     frequency_text.grid()
                     duty_widget.grid()
                     duty_text.grid()
+                frequency_widget.configure(state=tk.DISABLED if automatic.get() and effect_name != "常亮" else tk.NORMAL)
 
             effect_input.bind("<<ComboboxSelected>>", update_timing_inputs)
+            auto_input.configure(command=update_timing_inputs)
             update_timing_inputs()
         preview_area = ttk.Frame(themes)
-        preview_area.grid(row=0, column=8, rowspan=5, padx=(28, 4), sticky=tk.NSEW)
+        preview_area.grid(row=0, column=9, rowspan=5, padx=(28, 4), sticky=tk.NSEW)
         ttk.Button(
             preview_area,
             text="设置状态并预览",
@@ -640,7 +686,16 @@ class WindowsDashboardApp:
         tasks = []
         for index in range(task_count):
             if index < len(self._snapshot.tasks):
-                tasks.append(copy.deepcopy(self._snapshot.tasks[index]))
+                task = copy.deepcopy(self._snapshot.tasks[index])
+                automatic = self._style_auto_frequency.get(task.state)
+                task.automatic_frequency = bool(automatic and automatic.get())
+                if not task.automatic_frequency:
+                    frequency = self._style_frequencies.get(task.state)
+                    task.animation_period_ms = (
+                        max(200, min(10000, round(60000 / max(6, min(300, frequency.get())))))
+                        if frequency is not None else 0
+                    )
+                tasks.append(task)
             else:
                 tasks.append(TaskSlot(title=f"任务 {index + 1}", state=TaskState.IDLE, progress=0))
         self._snapshot = DashboardSnapshot(
@@ -664,6 +719,7 @@ class WindowsDashboardApp:
             return
         self._worker.submit(copy.deepcopy(self._snapshot))
         if human_action:
+            self._save_auto_frequency_states()
             self._post_status("灯板配置已下发")
 
     def _open_led_settings(self) -> None:
@@ -902,6 +958,50 @@ class WindowsDashboardApp:
         except (OSError, ValueError, TypeError, AttributeError):
             return defaults
 
+    def _load_system_color_source(self) -> str:
+        allowed = {"CPU 可用程度", "内存可用程度", "磁盘可用程度", "账号余量"}
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+            source = str(data.get("system_color_source", "账号余量"))
+            return source if source in allowed else "账号余量"
+        except (OSError, ValueError, TypeError):
+            return "账号余量"
+
+    def _system_color_source_changed(self, _event: object = None) -> None:
+        self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            data = {}
+        data["system_color_source"] = self._system_color_source.get()
+        self._settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._remaining.set(self._latest_resource_availability.get(self._system_color_source.get(), 100))
+        if not self._preview_active and self._worker is not None and self._worker.is_connected:
+            self._send()
+
+    def _load_auto_frequency_states(self) -> set[str]:
+        defaults = {TaskState.RUNNING.name, TaskState.SUCCESS.name, TaskState.WARNING.name}
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+            stored = data.get("auto_frequency_states")
+            if not isinstance(stored, list):
+                return defaults
+            valid = {state.name for state in TaskState if state != TaskState.IDLE}
+            return {str(name) for name in stored if str(name) in valid}
+        except (OSError, ValueError, TypeError):
+            return defaults
+
+    def _save_auto_frequency_states(self) -> None:
+        self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            data = {}
+        data["auto_frequency_states"] = [
+            state.name for state, enabled in self._style_auto_frequency.items() if enabled.get()
+        ]
+        self._settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def _load_sleep_timeout_minutes(self) -> int:
         try:
             data = json.loads(self._settings_path.read_text(encoding="utf-8"))
@@ -922,7 +1022,7 @@ class WindowsDashboardApp:
         values = {key: max(0, min(100, int(value.get()))) for key, value in self._busy_weight_vars.items()}
         total = sum(values.values())
         self._busy_formula_text.set(
-            "颜色由绿到红表示总体余量；闪烁速度表示综合繁忙度："
+            "闪烁速度表示综合繁忙度："
             f"任务数 {values['task']} + Token {values['token']} + CPU {values['cpu']} + 内存 {values['memory']} + "
             f"磁盘 {values['disk']} + 网络 {values['network']}（合计 {total}，计算时自动归一化）。"
         )
@@ -1657,6 +1757,15 @@ class WindowsDashboardApp:
             if isinstance(event, tuple) and event[0] == "codex_snapshot":
                 local_snapshot = event[1]
                 self._period_used.set(local_snapshot.busy_percent)
+                self._latest_resource_availability.update({
+                    "CPU 可用程度": local_snapshot.cpu_available_percent,
+                    "内存可用程度": local_snapshot.memory_available_percent,
+                    "磁盘可用程度": local_snapshot.disk_available_percent,
+                    "账号余量": self._remaining.get() if self._system_color_source.get() == "账号余量" else 100,
+                })
+                self._remaining.set(
+                    self._latest_resource_availability.get(self._system_color_source.get(), 100)
+                )
                 self._snapshot.tasks = local_snapshot.tasks
                 self._refresh_status_page()
                 if not self._preview_active and self._worker is not None and self._worker.is_connected:
