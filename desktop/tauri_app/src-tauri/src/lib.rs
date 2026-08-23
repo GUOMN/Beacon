@@ -59,6 +59,7 @@ struct NativeBleState {
     heartbeat_running: Arc<AtomicBool>,
     sequence: Arc<AtomicU8>,
     connected_device_id: Arc<AsyncMutex<Option<String>>>,
+    manual_disconnect: Arc<AtomicBool>,
 }
 
 impl NativeBleState {
@@ -74,6 +75,7 @@ impl NativeBleState {
             heartbeat_running: Arc::new(AtomicBool::new(false)),
             sequence: Arc::new(AtomicU8::new(0)),
             connected_device_id: Arc::new(AsyncMutex::new(None)),
+            manual_disconnect: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -185,7 +187,7 @@ async fn get_dashboard(
 ) -> Result<Value, String> {
     let result = run_bridge_async(bridge.inner().clone(), "dashboard", serde_json::json!({})).await?;
     let signature = serde_json::to_string(&result).map_err(|error| error.to_string())?;
-    let should_push = !*ble.preview_active.lock().await && {
+    let should_push = !ble.manual_disconnect.load(Ordering::SeqCst) && !*ble.preview_active.lock().await && {
         let mut previous = ble.last_dashboard.lock().await;
         if previous.as_ref() == Some(&signature) { false } else {
             *previous = Some(signature);
@@ -293,6 +295,20 @@ async fn identify_device(state: tauri::State<'_, NativeBleState>, address: Strin
 }
 
 #[tauri::command]
+async fn disconnect_device(state: tauri::State<'_, NativeBleState>) -> Result<Value, String> {
+    state.manual_disconnect.store(true, Ordering::SeqCst);
+    let peripheral = state.peripheral.lock().await.take();
+    if let Some(peripheral) = peripheral {
+        if peripheral.is_connected().await.unwrap_or(false) {
+            peripheral.disconnect().await.map_err(|error| format!("断开灯板失败：{error}"))?;
+        }
+    }
+    *state.connected_device_id.lock().await = None;
+    *state.last_dashboard.lock().await = None;
+    Ok(serde_json::json!({"ok":true}))
+}
+
+#[tauri::command]
 async fn ota_start(
     state: tauri::State<'_, NativeBleState>,
     address: String,
@@ -353,6 +369,7 @@ async fn ota_progress(state: tauri::State<'_, NativeBleState>) -> Result<Value, 
 }
 
 async fn native_apply(bridge: BridgeState, ble: NativeBleState, mut payload: Value) -> Result<Value, String> {
+    ble.manual_disconnect.store(false, Ordering::SeqCst);
     if let Some(preview) = payload.get("preview").and_then(Value::as_bool) {
         *ble.preview_active.lock().await = preview;
     }
@@ -468,7 +485,7 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![get_dashboard, scan_devices, identify_device, ota_start, ota_progress, bridge_action])
+        .invoke_handler(tauri::generate_handler![get_dashboard, scan_devices, identify_device, disconnect_device, ota_start, ota_progress, bridge_action])
         .run(tauri::generate_context!())
         .expect("error while running Beacon");
 }
