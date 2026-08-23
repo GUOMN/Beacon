@@ -8,9 +8,12 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_system.h"
+#include "esp_sleep.h"
+#include "esp_ota_ops.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "host/ble_hs.h"
+#include "host/ble_att.h"
 #include "host/ble_uuid.h"
 #include "led_status.h"
 #include "nimble/nimble_port.h"
@@ -29,6 +32,13 @@ static volatile bool s_ever_connected;
 static volatile TickType_t s_last_data_tick;
 static char s_device_name[STATUS_BLE_DEVICE_NAME_MAX];
 static volatile bool s_identifying;
+static volatile TickType_t s_disconnected_since_tick;
+static uint16_t s_sleep_timeout_minutes = STATUS_SLEEP_TIMEOUT_DEFAULT_MIN;
+static esp_ota_handle_t s_ota_handle;
+static const esp_partition_t *s_ota_partition;
+static size_t s_ota_expected_size;
+static size_t s_ota_received_size;
+static bool s_ota_active;
 
 static void delayed_restart_task(void *arg)
 {
@@ -47,15 +57,43 @@ static void delayed_restart_task(void *arg)
 #define PACKET_TYPE_TASK_STATE    0x06U
 #define PACKET_TYPE_PANEL_HEADER  0x07U
 #define PACKET_TYPE_LED_COUNT     0x08U
+#define PACKET_TYPE_SLEEP_TIMEOUT 0x09U
 #define HEARTBEAT_PACKET_SIZE     4U
 #define SNAPSHOT_PACKET_SIZE      17U
 #define RAW_LED_PACKET_SIZE       12U
 #define IDENTIFY_PACKET_SIZE      4U
 #define STATE_STYLE_PACKET_SIZE_LEGACY   9U
 #define STATE_STYLE_PACKET_SIZE_EXTENDED 12U
-#define TASK_STATE_PACKET_SIZE    7U
+#define TASK_STATE_PACKET_SIZE_LEGACY 7U
+#define TASK_STATE_PACKET_SIZE_EXTENDED 9U
 #define PANEL_HEADER_PACKET_SIZE  7U
 #define LED_COUNT_PACKET_SIZE     5U
+#define SLEEP_TIMEOUT_PACKET_SIZE 6U
+
+static esp_err_t save_sleep_timeout(uint16_t minutes)
+{
+    nvs_handle_t handle;
+    ESP_RETURN_ON_ERROR(nvs_open("status_panel", NVS_READWRITE, &handle), TAG,
+                        "打开休眠设置失败");
+    esp_err_t result = nvs_set_u16(handle, "sleep_min", minutes);
+    if (result == ESP_OK) {
+        result = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return result;
+}
+
+static void enter_deep_sleep(void)
+{
+    ESP_LOGI(TAG, "蓝牙已断连 %u 分钟，关闭灯光并进入深度睡眠",
+             s_sleep_timeout_minutes);
+    const led_status_t off = {.effect = LED_EFFECT_OFF};
+    for (uint8_t i = 0; i < led_status_get_active_count(); ++i) {
+        ESP_ERROR_CHECK(led_status_set(i, &off));
+    }
+    vTaskDelay(pdMS_TO_TICKS(STATUS_FRAME_MS * 2U));
+    esp_deep_sleep_start();
+}
 
 // 认领时暂存原灯效，播放白色流水后原样恢复。
 static void identify_task(void *arg)
@@ -97,6 +135,97 @@ static const ble_uuid128_t STATUS_SERVICE_UUID = BLE_UUID128_INIT(
 static const ble_uuid128_t STATUS_CONTROL_UUID = BLE_UUID128_INIT(
     0x6a, 0x7d, 0x17, 0xe4, 0xb8, 0x32, 0x4c, 0x93,
     0x9e, 0x81, 0x25, 0x76, 0x10, 0xc3, 0x00, 0x02);
+static const ble_uuid128_t STATUS_OTA_UUID = BLE_UUID128_INIT(
+    0x6a, 0x7d, 0x17, 0xe4, 0xb8, 0x32, 0x4c, 0x93,
+    0x9e, 0x81, 0x25, 0x76, 0x10, 0xc3, 0x00, 0x03);
+
+enum {
+    OTA_COMMAND_START = 0x01,
+    OTA_COMMAND_DATA = 0x02,
+    OTA_COMMAND_FINISH = 0x03,
+    OTA_COMMAND_ABORT = 0x04,
+};
+
+static void ota_abort(void)
+{
+    if (s_ota_active) {
+        esp_ota_abort(s_ota_handle);
+    }
+    s_ota_active = false;
+    s_ota_partition = NULL;
+    s_ota_expected_size = 0;
+    s_ota_received_size = 0;
+}
+
+static int ota_access(uint16_t conn_handle, uint16_t attr_handle,
+                      struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    }
+    const uint16_t packet_len = OS_MBUF_PKTLEN(ctxt->om);
+    uint8_t packet[512];
+    if (packet_len < 1U || packet_len > sizeof(packet) ||
+        ble_hs_mbuf_to_flat(ctxt->om, packet, packet_len, NULL) != 0) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    esp_err_t result = ESP_ERR_INVALID_ARG;
+    switch (packet[0]) {
+    case OTA_COMMAND_START:
+        if (packet_len == 5U) {
+            ota_abort();
+            s_ota_expected_size = (size_t)packet[1] | ((size_t)packet[2] << 8) |
+                                  ((size_t)packet[3] << 16) | ((size_t)packet[4] << 24);
+            s_ota_partition = esp_ota_get_next_update_partition(NULL);
+            if (s_ota_partition != NULL && s_ota_expected_size > 0U &&
+                s_ota_expected_size <= s_ota_partition->size) {
+                result = esp_ota_begin(s_ota_partition, s_ota_expected_size, &s_ota_handle);
+                if (result == ESP_OK) {
+                    s_ota_active = true;
+                    ESP_LOGI(TAG, "开始蓝牙 OTA：%u 字节写入 %s",
+                             (unsigned)s_ota_expected_size, s_ota_partition->label);
+                }
+            }
+        }
+        break;
+    case OTA_COMMAND_DATA:
+        if (s_ota_active && packet_len > 1U &&
+            s_ota_received_size + packet_len - 1U <= s_ota_expected_size) {
+            result = esp_ota_write(s_ota_handle, &packet[1], packet_len - 1U);
+            if (result == ESP_OK) {
+                s_ota_received_size += packet_len - 1U;
+            }
+        }
+        break;
+    case OTA_COMMAND_FINISH:
+        if (packet_len == 1U && s_ota_active &&
+            s_ota_received_size == s_ota_expected_size) {
+            result = esp_ota_end(s_ota_handle);
+            s_ota_active = false;
+            if (result == ESP_OK) {
+                result = esp_ota_set_boot_partition(s_ota_partition);
+            }
+            if (result == ESP_OK) {
+                ESP_LOGI(TAG, "蓝牙 OTA 校验通过，即将切换到新固件");
+                xTaskCreate(delayed_restart_task, "ota_restart", 2048, NULL, 5, NULL);
+            } else {
+                ota_abort();
+            }
+        }
+        break;
+    case OTA_COMMAND_ABORT:
+        ota_abort();
+        result = ESP_OK;
+        break;
+    default:
+        break;
+    }
+    return result == ESP_OK ? 0 : BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+}
 
 static int control_access(uint16_t conn_handle, uint16_t attr_handle,
                           struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -180,10 +309,15 @@ static int control_access(uint16_t conn_handle, uint16_t attr_handle,
         }
         break;
     case PACKET_TYPE_TASK_STATE:
-        if (packet_len == TASK_STATE_PACKET_SIZE &&
+        if ((packet_len == TASK_STATE_PACKET_SIZE_LEGACY ||
+             packet_len == TASK_STATE_PACKET_SIZE_EXTENDED) &&
             packet[4] < led_status_get_active_count() - 1U) {
-            result = dashboard_status_set((uint8_t)(packet[4] + 1U),
-                                          (panel_state_t)packet[5], packet[6]);
+            const uint16_t period_ms = packet_len == TASK_STATE_PACKET_SIZE_EXTENDED
+                                           ? ((uint16_t)packet[7] | ((uint16_t)packet[8] << 8))
+                                           : 0U;
+            result = dashboard_status_set_with_period((uint8_t)(packet[4] + 1U),
+                                                      (panel_state_t)packet[5], packet[6],
+                                                      period_ms);
         }
         break;
     case PACKET_TYPE_LED_COUNT:
@@ -208,6 +342,18 @@ static int control_access(uint16_t conn_handle, uint16_t attr_handle,
                         result = ESP_ERR_NO_MEM;
                     }
                 }
+            }
+        }
+        break;
+    case PACKET_TYPE_SLEEP_TIMEOUT:
+        if (packet_len == SLEEP_TIMEOUT_PACKET_SIZE) {
+            const uint16_t minutes = (uint16_t)packet[4] | ((uint16_t)packet[5] << 8);
+            result = minutes >= 1U && minutes <= STATUS_SLEEP_TIMEOUT_MAX_MIN
+                         ? save_sleep_timeout(minutes)
+                         : ESP_ERR_INVALID_ARG;
+            if (result == ESP_OK) {
+                s_sleep_timeout_minutes = minutes;
+                ESP_LOGI(TAG, "断连休眠等待时间已更新为 %u 分钟", minutes);
             }
         }
         break;
@@ -240,6 +386,11 @@ static const struct ble_gatt_svc_def s_services[] = {
             {
                 .uuid = &STATUS_CONTROL_UUID.u,
                 .access_cb = control_access,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+            },
+            {
+                .uuid = &STATUS_OTA_UUID.u,
+                .access_cb = ota_access,
                 .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
             },
             {0},
@@ -292,6 +443,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_connected = true;
             s_ever_connected = true;
             s_last_data_tick = xTaskGetTickCount();
+            s_disconnected_since_tick = 0;
             // 配对成功后熄灭等待动画，六颗灯全部留给后续业务快照。
             for (uint8_t i = 0; i < led_status_get_active_count(); ++i) {
                 ESP_ERROR_CHECK(dashboard_status_set(i, PANEL_STATE_IDLE, 0));
@@ -303,6 +455,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         s_connected = false;
+        s_disconnected_since_tick = xTaskGetTickCount();
         ESP_LOGI(TAG, "蓝牙已断开，重新等待连接");
         ESP_ERROR_CHECK(dashboard_status_set_connection(false, false, true));
         start_advertising();
@@ -323,6 +476,7 @@ static void host_sync(void)
         return;
     }
     ESP_ERROR_CHECK(dashboard_status_set_connection(false, false, false));
+    s_disconnected_since_tick = xTaskGetTickCount();
     start_advertising();
     ESP_LOGI(TAG, "纯蓝牙状态服务已启动：%s", s_device_name);
 }
@@ -350,6 +504,13 @@ static void health_task(void *arg)
                 s_connected, alive, s_ever_connected && !alive));
             was_alive = alive;
         }
+        if (!s_connected && s_disconnected_since_tick != 0U) {
+            const TickType_t disconnected_ticks = xTaskGetTickCount() - s_disconnected_since_tick;
+            const uint64_t timeout_ms = (uint64_t)s_sleep_timeout_minutes * 60ULL * 1000ULL;
+            if ((uint64_t)disconnected_ticks * portTICK_PERIOD_MS >= timeout_ms) {
+                enter_deep_sleep();
+            }
+        }
         vTaskDelay(pdMS_TO_TICKS(STATUS_HEALTH_CHECK_MS));
     }
 }
@@ -365,8 +526,18 @@ esp_err_t ble_status_service_start(void)
 
     // NimBLE 需要 NVS 保存射频校准和绑定信息，但不会自动擦除 NVS。
     ESP_RETURN_ON_ERROR(nvs_flash_init(), TAG, "NVS 初始化失败");
+    nvs_handle_t settings_handle;
+    if (nvs_open("status_panel", NVS_READONLY, &settings_handle) == ESP_OK) {
+        uint16_t saved_minutes = STATUS_SLEEP_TIMEOUT_DEFAULT_MIN;
+        if (nvs_get_u16(settings_handle, "sleep_min", &saved_minutes) == ESP_OK &&
+            saved_minutes >= 1U && saved_minutes <= STATUS_SLEEP_TIMEOUT_MAX_MIN) {
+            s_sleep_timeout_minutes = saved_minutes;
+        }
+        nvs_close(settings_handle);
+    }
 
     ESP_RETURN_ON_ERROR(nimble_port_init(), TAG, "NimBLE 初始化失败");
+    ESP_RETURN_ON_ERROR(ble_att_set_preferred_mtu(247), TAG, "设置 OTA 蓝牙 MTU 失败");
 
     ble_svc_gap_init();
     ble_svc_gatt_init();

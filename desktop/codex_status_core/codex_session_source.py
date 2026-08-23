@@ -24,7 +24,6 @@ class CodexSessionSource:
         self._root = Path.home() / ".codex"
         self._offsets: dict[Path, int] = {}
         self._titles: dict[str, str] = {}
-        self._summaries: dict[str, str] = {}
         self._waiting_calls: dict[str, set[str]] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -102,9 +101,6 @@ class CodexSessionSource:
         title = self._titles.get(thread_id, "Codex 任务")
 
         if envelope_type == "event_msg" and event_type == "user_message":
-            message = " ".join(str(payload.get("message") or "").split())
-            if message:
-                self._summaries[thread_id] = message[:240]
             return
         if envelope_type == "event_msg" and event_type == "token_count":
             info = payload.get("info")
@@ -146,7 +142,6 @@ class CodexSessionSource:
         self._store.record({
             "task_id": task_id,
             "title": title,
-            "summary": self._summaries.get(thread_id, title),
             "state": state,
             "progress": 100 if state == "success" else 0,
             "source": "codex-live",

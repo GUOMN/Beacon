@@ -52,15 +52,45 @@ class BLEProtocol:
             raise ValueError("任务索引必须在 0~62 之间")
         task.validate()
         return bytes((0xC3, 1, 6, sequence & 0xFF, task_index,
-                      int(task.state), task.progress))
+                      int(task.state), task.progress,
+                      task.animation_period_ms & 0xFF,
+                      (task.animation_period_ms >> 8) & 0xFF))
 
     @classmethod
     def encode_led_count(cls, sequence: int, total_count: int) -> bytes:
         if not 2 <= total_count <= 64:
             raise ValueError("灯珠总数必须在 2~64 之间")
         return bytes((0xC3, 1, 8, sequence & 0xFF, total_count))
+
+    @classmethod
+    def encode_sleep_timeout(cls, sequence: int, minutes: int) -> bytes:
+        """配置断连后进入深度睡眠的等待时间，并由固件保存到 Flash。"""
+        if not 1 <= minutes <= 1440:
+            raise ValueError("断连休眠时间必须在 1~1440 分钟之间")
+        return bytes((0xC3, 1, 9, sequence & 0xFF, minutes & 0xFF, minutes >> 8))
     SERVICE_UUID = "0100c310-7625-819e-934c-32b8e4177d6a"
     CONTROL_UUID = "0200c310-7625-819e-934c-32b8e4177d6a"
+    OTA_UUID = "0300c310-7625-819e-934c-32b8e4177d6a"
+
+    @staticmethod
+    def encode_ota_start(size: int) -> bytes:
+        if not 1 <= size <= 2 * 1024 * 1024:
+            raise ValueError("OTA 固件大小无效")
+        return bytes((1, size & 0xFF, (size >> 8) & 0xFF, (size >> 16) & 0xFF, size >> 24))
+
+    @staticmethod
+    def encode_ota_data(chunk: bytes) -> bytes:
+        if not chunk or len(chunk) > 511:
+            raise ValueError("OTA 数据块大小无效")
+        return bytes((2,)) + chunk
+
+    @staticmethod
+    def encode_ota_finish() -> bytes:
+        return bytes((3,))
+
+    @staticmethod
+    def encode_ota_abort() -> bytes:
+        return bytes((4,))
 
     _MAGIC = 0xC3
     _VERSION = 0x01

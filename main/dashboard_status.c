@@ -130,11 +130,22 @@ static led_status_t semantic_to_led(panel_state_t state, uint8_t progress)
 
 esp_err_t dashboard_status_set(uint8_t led_index, panel_state_t state, uint8_t progress)
 {
+    return dashboard_status_set_with_period(led_index, state, progress, 0U);
+}
+
+esp_err_t dashboard_status_set_with_period(uint8_t led_index, panel_state_t state,
+                                           uint8_t progress, uint16_t period_ms)
+{
     ESP_RETURN_ON_FALSE(led_index < led_status_get_active_count(),
                         ESP_ERR_INVALID_ARG, "dashboard", "灯珠编号无效");
     ESP_RETURN_ON_FALSE(state <= PANEL_STATE_ERROR && progress <= 100U,
                         ESP_ERR_INVALID_ARG, "dashboard", "状态或进度无效");
-    const led_status_t led = semantic_to_led(state, progress);
+    led_status_t led = semantic_to_led(state, progress);
+    if (period_ms != 0U && led.effect != LED_EFFECT_SOLID && led.effect != LED_EFFECT_OFF) {
+        ESP_RETURN_ON_FALSE(period_ms >= 200U && period_ms <= 10000U,
+                            ESP_ERR_INVALID_ARG, "dashboard", "任务动画周期超出范围");
+        led.period_ms = period_ms;
+    }
     return led_status_set(led_index, &led);
 }
 

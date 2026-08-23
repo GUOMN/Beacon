@@ -49,10 +49,13 @@ class TaskSlot:
     title: str
     state: TaskState = TaskState.IDLE
     progress: int = 0
+    animation_period_ms: int = 0
 
     def validate(self) -> None:
         if not 0 <= self.progress <= 100:
             raise ValueError("任务进度必须在 0~100 之间")
+        if self.animation_period_ms != 0 and not 200 <= self.animation_period_ms <= 10000:
+            raise ValueError("任务独立动画周期必须为 0 或 200~10000 毫秒")
 
 
 @dataclass(slots=True)
@@ -62,6 +65,7 @@ class DashboardSnapshot:
     remaining_percent: int = 100
     period_used_percent: int = 0
     master_brightness_percent: int = 60
+    sleep_timeout_minutes: int = 10
     state_styles: dict[TaskState, StateStyle] = field(default_factory=dict)
     tasks: list[TaskSlot] = field(
         default_factory=lambda: [TaskSlot(f"任务 {index + 1}") for index in range(5)]
@@ -74,6 +78,8 @@ class DashboardSnapshot:
             raise ValueError("周期用量必须在 0~100 之间")
         if not 0 <= self.master_brightness_percent <= 100:
             raise ValueError("整体亮度必须在 0~100 之间")
+        if not 1 <= self.sleep_timeout_minutes <= 1440:
+            raise ValueError("断连休眠时间必须在 1~1440 分钟之间")
         if not 1 <= len(self.tasks) <= 63:
             raise ValueError("任务灯数量必须在 1~63 之间")
         for task in self.tasks:

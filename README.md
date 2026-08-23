@@ -53,3 +53,9 @@ python -m venv .venv
 
 协议模型、蓝牙客户端和编码器位于 `desktop/codex_status_core`，界面位于
 `desktop/windows_app`，协议单元测试位于 `desktop/tests`。
+# 固件升级说明
+
+- 第一次启用双分区 OTA，必须通过串口把 `ws2812_ota_initial_4mb.bin` 从 Flash 地址 `0x0` 写入。它包含引导程序、4 MB 分区表和应用程序。
+- 后续在桌面端点击“蓝牙升级”，只选择 `ws2812_ota_update.bin`。不要把首次串口整包用于蓝牙升级。
+- 升级期间保持灯板稳定供电和蓝牙连接；新固件校验成功后会自动切换并重启，启动失败时由回滚机制保留上一版。
+- 自动休眠默认是断连 10 分钟。休眠后灯光与蓝牙均停止，短按 RESET 重新启动。

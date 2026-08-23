@@ -8,11 +8,14 @@
 #include "dashboard_status.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "esp_ota_ops.h"
 
 static const char *TAG = "status_panel";
 
 void app_main(void)
 {
+    /* 新 OTA 镜像能正常进入 app_main 即确认有效，避免下次启动自动回滚。 */
+    esp_ota_mark_app_valid_cancel_rollback();
     /* 上电时先读取上位机保存的灯珠数，首次启动默认 6 颗。 */
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(dashboard_status_load_saved_styles());

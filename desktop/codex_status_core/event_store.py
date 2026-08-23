@@ -64,7 +64,6 @@ class StatusEventStore:
                     state TEXT NOT NULL,
                     progress INTEGER NOT NULL DEFAULT 0,
                     source TEXT NOT NULL DEFAULT 'codex',
-                    summary TEXT NOT NULL DEFAULT '',
                     input_tokens INTEGER NOT NULL DEFAULT 0,
                     output_tokens INTEGER NOT NULL DEFAULT 0,
                     event_key TEXT,
@@ -90,13 +89,15 @@ class StatusEventStore:
             )
             columns = {row[1] for row in database.execute("PRAGMA table_info(task_events)")}
             for name, definition in (
-                ("summary", "TEXT NOT NULL DEFAULT ''"),
                 ("input_tokens", "INTEGER NOT NULL DEFAULT 0"),
                 ("output_tokens", "INTEGER NOT NULL DEFAULT 0"),
                 ("event_key", "TEXT"),
             ):
                 if name not in columns:
                     database.execute(f"ALTER TABLE task_events ADD COLUMN {name} {definition}")
+            # 摘要不再属于任务模型；升级旧数据库时直接删除该列及其历史内容。
+            if "summary" in columns:
+                database.execute("ALTER TABLE task_events DROP COLUMN summary")
             database.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_events_event_key ON task_events(event_key) WHERE event_key IS NOT NULL"
             )
@@ -114,18 +115,16 @@ class StatusEventStore:
         title_value = event.get("title") if "title" in event else None
         progress = max(0, min(100, int(event.get("progress", 0))))
         source = str(event.get("source") or "codex").strip()[:80]
-        summary_value = event.get("summary") if "summary" in event else None
         input_tokens = max(0, int(event.get("input_tokens", 0) or 0))
         output_tokens = max(0, int(event.get("output_tokens", 0) or 0))
         event_key = str(event.get("event_key") or "").strip()[:500] or None
         occurred_at_ms = int(event.get("occurred_at_ms") or time.time_ns() // 1_000_000)
         with self._connect() as database:
             previous = database.execute(
-                "SELECT title,summary FROM task_events WHERE task_id=? ORDER BY occurred_at_ms DESC,id DESC LIMIT 1",
+                "SELECT title FROM task_events WHERE task_id=? ORDER BY occurred_at_ms DESC,id DESC LIMIT 1",
                 (task_id,),
             ).fetchone()
             title = str(title_value if title_value is not None else (previous["title"] if previous else "Agent 任务")).strip()[:240]
-            summary = str(summary_value if summary_value is not None else (previous["summary"] if previous else "")).strip()[:500]
             database.execute(
                 """INSERT OR IGNORE INTO task_layout(task_id, display_order, hidden)
                    VALUES (?, COALESCE((SELECT MAX(display_order) + 1 FROM task_layout), 0), 0)""",
@@ -133,10 +132,10 @@ class StatusEventStore:
             )
             database.execute(
                 """
-                INSERT OR IGNORE INTO task_events(task_id, title, state, progress, source, summary, input_tokens, output_tokens, event_key, occurred_at_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO task_events(task_id, title, state, progress, source, input_tokens, output_tokens, event_key, occurred_at_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (task_id, title, state, progress, source, summary, input_tokens, output_tokens, event_key, occurred_at_ms),
+                (task_id, title, state, progress, source, input_tokens, output_tokens, event_key, occurred_at_ms),
             )
 
     def latest_records(self, limit: int = 500) -> list[dict[str, Any]]:
@@ -148,12 +147,13 @@ class StatusEventStore:
                     SELECT *, ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY occurred_at_ms DESC, id DESC) position
                     FROM task_events
                 )
-                SELECT ranked.task_id,title,state,progress,source,summary,occurred_at_ms,
+                SELECT ranked.task_id,title,state,progress,source,occurred_at_ms,
                        COALESCE(layout.display_order,2147483647) display_order,
                        COALESCE(layout.pinned,0) pinned,
                        (SELECT MIN(first_event.occurred_at_ms) FROM task_events first_event WHERE first_event.task_id=ranked.task_id) first_at,
                        COALESCE(usage.total_tokens,0) total_tokens,
-                       COALESCE(usage.context_window,0) context_window
+                       COALESCE(usage.context_window,0) context_window,
+                       (SELECT COUNT(*) FROM task_events event_count WHERE event_count.task_id=ranked.task_id) event_count
                 FROM ranked
                 LEFT JOIN task_layout layout ON layout.task_id=ranked.task_id
                 LEFT JOIN task_usage usage ON usage.task_id=ranked.task_id
@@ -253,14 +253,22 @@ class StatusEventStore:
     def snapshot(self, task_limit: int) -> BridgeSnapshot:
         latest = self.latest_records(max(1, min(63, task_limit)))
 
-        tasks = [
-            TaskSlot(
+        now_ms = time.time_ns() // 1_000_000
+        tasks = []
+        for row in latest:
+            token_ratio = (
+                min(100.0, int(row["total_tokens"]) * 100.0 / int(row["context_window"]))
+                if int(row["context_window"]) > 0 else 0.0
+            )
+            event_ratio = min(100.0, int(row["event_count"]) * 5.0)
+            duration_ratio = min(100.0, max(0, now_ms - int(row["first_at"])) / 36_000.0)
+            workload = min(100.0, token_ratio * 0.6 + event_ratio * 0.25 + duration_ratio * 0.15)
+            tasks.append(TaskSlot(
                 title=str(row["title"]),
                 state=STATE_NAMES[str(row["state"])],
                 progress=int(row["progress"]),
-            )
-            for row in latest
-        ]
+                animation_period_ms=max(500, min(3200, round(3200 - workload * 27))),
+            ))
         while len(tasks) < task_limit:
             tasks.append(TaskSlot(title=f"任务 {len(tasks) + 1}", state=TaskState.IDLE))
         active_states = {"running", "waiting", "warning", "failure"}

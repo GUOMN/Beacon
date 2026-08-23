@@ -37,7 +37,7 @@ def _task_id(provider: str, payload: dict[str, Any]) -> str:
 
 
 def _task_identity(provider: str, payload: dict[str, Any], state: str) -> dict[str, str]:
-    """只在开始事件提取短标题/摘要，后续状态事件不覆盖它们。"""
+    """只在开始事件提取短标题，后续状态事件不覆盖它。"""
     if state != "running":
         return {}
     text = ""
@@ -47,7 +47,7 @@ def _task_identity(provider: str, payload: dict[str, Any], state: str) -> dict[s
             text = " ".join(value.split())
             break
     if text:
-        return {"title": text[:80], "summary": text[:240]}
+        return {"title": text[:80]}
     return {"title": f"{provider.title()} 任务"}
 
 

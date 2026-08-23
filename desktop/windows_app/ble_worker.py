@@ -31,6 +31,16 @@ class BLEWorker:
             return
         asyncio.run_coroutine_threadsafe(self._client.submit(snapshot), self._loop)
 
+    def submit_ota(self, firmware: bytes) -> None:
+        if self._loop is None or self._client is None or not self.is_connected:
+            self._status_callback("灯板尚未连接，不能开始蓝牙升级")
+            return
+        future = asyncio.run_coroutine_threadsafe(self._client.submit_ota(firmware), self._loop)
+        try:
+            future.result(timeout=2)
+        except Exception as exc:
+            self._status_callback(f"提交固件升级失败：{exc}")
+
     def stop(self) -> None:
         if self._loop is not None and self._client is not None:
             future = asyncio.run_coroutine_threadsafe(self._client.stop(), self._loop)

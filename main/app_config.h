@@ -36,6 +36,10 @@
 // 超时检测任务的检查周期
 #define STATUS_HEALTH_CHECK_MS           1000U
 
+// 蓝牙断连后进入深度睡眠的默认等待时间；上位机可在 1~1440 分钟内覆盖并保存
+#define STATUS_SLEEP_TIMEOUT_DEFAULT_MIN 10U
+#define STATUS_SLEEP_TIMEOUT_MAX_MIN     1440U
+
 // 上电硬件自检时间：六颗灯先固定点亮，随后进入蓝牙等待动画
 #define STATUS_POWER_ON_TEST_MS          1500U
 

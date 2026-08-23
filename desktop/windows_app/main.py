@@ -12,7 +12,7 @@ import sys
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from codex_status_core.models import DashboardSnapshot, StateStyle, TaskSlot, TaskState
 from windows_app.ble_worker import BLEWorker, identify_status_device, scan_status_devices
@@ -46,6 +46,7 @@ class WindowsDashboardApp:
         self._busy_formula_text = tk.StringVar()
         self._total_led_count = tk.IntVar(value=6)
         self._total_led_text = tk.StringVar(value="总灯数：6")
+        self._sleep_timeout_minutes = tk.IntVar(value=self._load_sleep_timeout_minutes())
         self._status = tk.StringVar(value="连接中")
         self._preview_active = False
         self._five_hour_tokens = tk.StringVar(value="等待数据源")
@@ -117,6 +118,19 @@ class WindowsDashboardApp:
         style.configure(".", font=("Microsoft YaHei UI", 10))
         style.configure("TFrame", background="#F7F7F7")
         style.configure("TLabel", background="#F7F7F7", foreground="#252525")
+        style.configure(
+            "Section.TButton",
+            background="#FFFFFF",
+            foreground="#2A2A2A",
+            bordercolor="#E3E3E0",
+            lightcolor="#FFFFFF",
+            darkcolor="#FFFFFF",
+            relief="flat",
+            anchor=tk.W,
+            padding=(12, 9),
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        style.map("Section.TButton", background=[("active", "#F0F0EC")])
         style.configure(
             "TLabelframe",
             background="#F7F7F7",
@@ -250,17 +264,12 @@ class WindowsDashboardApp:
             font=("Microsoft YaHei UI", 15, "bold"),
             foreground="#252525",
         ).pack(side=tk.LEFT, anchor=tk.W)
-        ttk.Button(top_bar, text="设备管理", command=self._open_device_manager).pack(side=tk.RIGHT)
-        ttk.Button(top_bar, text="数据源", command=self._open_data_sources).pack(side=tk.RIGHT, padx=(0, 8))
-        ttk.Button(top_bar, text="灯带校准", command=self._open_calibration).pack(
-            side=tk.RIGHT, padx=(0, 8)
-        )
 
         notebook = ttk.Notebook(outer)
         notebook.pack(fill=tk.BOTH, expand=True)
         status_tab = ttk.Frame(notebook, padding=16)
-        settings_tab = ttk.Frame(notebook, padding=16)
-        notebook.add(status_tab, text="状态")
+        settings_tab = ttk.Frame(notebook)
+        notebook.add(status_tab, text="任务面板")
         notebook.add(settings_tab, text="设置")
 
         metrics = ttk.Frame(status_tab)
@@ -279,6 +288,7 @@ class WindowsDashboardApp:
         task_header = ttk.Frame(status_tab)
         task_header.pack(fill=tk.X)
         ttk.Label(task_header, text="任务与灯位", font=("Microsoft YaHei UI", 12, "bold")).pack(side=tk.LEFT)
+        ttk.Button(task_header, text="数据源", command=self._open_data_sources).pack(side=tk.RIGHT)
         filter_button = ttk.Menubutton(task_header, textvariable=self._state_filter_summary)
         filter_button.pack(side=tk.LEFT, padx=(18, 0))
         filter_menu = tk.Menu(filter_button, tearoff=False, font=("Microsoft YaHei UI", 10))
@@ -297,25 +307,84 @@ class WindowsDashboardApp:
         ttk.Button(task_actions, text="删除选中任务", command=self._delete_selected_tasks, style="Danger.TButton").pack(side=tk.RIGHT)
         ttk.Button(task_actions, text="删除已完成任务", command=self._delete_completed_tasks, style="Danger.TButton").pack(side=tk.RIGHT, padx=(0, 8))
         ttk.Label(task_actions, text="第一个灯是系统状态灯，从第二个灯开始计数，灯位为 1；任务信息只读，使用操作列选择、拖动或固定。", foreground="#777777").pack(side=tk.LEFT)
-        self._status_tree = ttk.Treeview(status_tab, columns=("led", "effect", "task", "state", "summary", "source"), show="tree headings", selectmode="none")
+        self._status_tree = ttk.Treeview(status_tab, columns=("led", "effect", "task", "state", "source"), show="tree headings", selectmode="none")
         self._status_tree.heading("#0", text="🔷 操作")
-        self._status_tree.column("#0", width=185, anchor=tk.W)
-        for key, title, width in (("led", "灯位", 60), ("effect", "当前灯效", 105), ("task", "任务", 190), ("state", "任务状态", 85), ("summary", "摘要", 300), ("source", "来源", 75)):
-            self._status_tree.heading(key, text=title)
-            self._status_tree.column(key, width=width, anchor=tk.W)
+        self._status_tree.column("#0", width=112, anchor=tk.CENTER)
+        for key, title, width in (("led", "灯位", 60), ("effect", "当前灯效", 120), ("task", "任务", 360), ("state", "任务状态", 100), ("source", "来源", 90)):
+            self._status_tree.heading(key, text=title, anchor=tk.CENTER)
+            self._status_tree.column(key, width=width, anchor=tk.CENTER)
         self._status_tree.pack(fill=tk.BOTH, expand=True)
         self._status_tree.bind("<ButtonPress-1>", self._begin_task_drag, add="+")
         self._status_tree.bind("<B1-Motion>", self._move_task_drag, add="+")
         self._status_tree.bind("<ButtonRelease-1>", self._finish_task_drag, add="+")
 
-        settings_header = ttk.Frame(settings_tab)
+        # 设置项较多，使用画布承载可滚动内容，避免小窗口下底部配置被裁掉。
+        settings_canvas = tk.Canvas(settings_tab, highlightthickness=0, background="#F7F7F5")
+        settings_scrollbar = ttk.Scrollbar(settings_tab, orient=tk.VERTICAL, command=settings_canvas.yview)
+        settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
+        settings_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        settings_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        settings_content = ttk.Frame(settings_canvas, padding=16)
+        settings_window = settings_canvas.create_window((0, 0), window=settings_content, anchor=tk.NW)
+
+        def refresh_settings_scroll(_event: object = None) -> None:
+            settings_canvas.configure(scrollregion=settings_canvas.bbox("all"))
+
+        def resize_settings_content(event: tk.Event) -> None:
+            settings_canvas.itemconfigure(settings_window, width=event.width)
+
+        def scroll_settings(event: tk.Event) -> None:
+            settings_canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        settings_content.bind("<Configure>", refresh_settings_scroll)
+        settings_canvas.bind("<Configure>", resize_settings_content)
+        settings_canvas.bind("<Enter>", lambda _event: settings_canvas.bind_all("<MouseWheel>", scroll_settings))
+        settings_canvas.bind("<Leave>", lambda _event: settings_canvas.unbind_all("<MouseWheel>"))
+
+        def collapsible_section(title: str, *, expanded: bool = True) -> ttk.Frame:
+            """创建可独立折叠的设置区块，返回用于放置实际控件的内容容器。"""
+            section = ttk.Frame(settings_content)
+            section.pack(fill=tk.X, pady=(0, 10))
+            body = ttk.Frame(section)
+            opened = tk.BooleanVar(value=expanded)
+            toggle = ttk.Button(section, style="Section.TButton")
+
+            def apply_state() -> None:
+                toggle.configure(text=("▾  " if opened.get() else "▸  ") + title)
+                if opened.get():
+                    body.pack(fill=tk.X, pady=(5, 0))
+                else:
+                    body.pack_forget()
+                settings_content.after_idle(refresh_settings_scroll)
+
+            def toggle_state() -> None:
+                opened.set(not opened.get())
+                apply_state()
+
+            toggle.configure(command=toggle_state)
+            toggle.pack(fill=tk.X, anchor=tk.W)
+            apply_state()
+            return body
+
+        settings_header = ttk.Frame(settings_content)
         settings_header.pack(fill=tk.X, pady=(0, 12))
         header_text = ttk.Frame(settings_header)
         header_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(header_text, text="灯板设置", font=("Microsoft YaHei UI", 14, "bold")).pack(anchor=tk.W)
         ttk.Label(header_text, text="统一配置灯珠数量、系统灯以及所有任务状态的颜色和动画。", foreground="#777777").pack(anchor=tk.W, pady=(3, 0))
+        ttk.Button(settings_header, text="设备管理", command=self._open_device_manager).pack(side=tk.RIGHT)
+        ttk.Button(settings_header, text="灯带颜色校准", command=self._open_calibration).pack(
+            side=tk.RIGHT, padx=(0, 8)
+        )
+        ttk.Button(settings_header, text="保存并生效", command=self._send, style="Apply.TButton").pack(
+            side=tk.RIGHT, padx=(0, 8)
+        )
+        ttk.Button(settings_header, text="蓝牙升级", command=self._start_ota_update).pack(
+            side=tk.RIGHT, padx=(0, 8)
+        )
 
-        usage = ttk.LabelFrame(settings_tab, text="第一颗灯 · 系统用量", padding=12)
+        usage_section = collapsible_section("第一颗灯 · 系统用量")
+        usage = ttk.LabelFrame(usage_section, text="系统繁忙度与亮度", padding=12)
         usage.pack(fill=tk.X)
         self._add_scale(usage, "整体亮度", self._master_brightness, 0)
         weight_row = ttk.Frame(usage)
@@ -334,16 +403,18 @@ class WindowsDashboardApp:
         ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
         usage.columnconfigure(1, weight=1)
 
-        led_summary = ttk.LabelFrame(settings_tab, text="灯带", padding=12)
-        led_summary.pack(fill=tk.X, pady=(14, 0))
+        led_section = collapsible_section("灯带")
+        led_summary = ttk.LabelFrame(led_section, text="灯珠数量", padding=12)
+        led_summary.pack(fill=tk.X)
         ttk.Button(
             led_summary,
             textvariable=self._total_led_text,
             command=self._open_led_settings,
         ).pack(anchor=tk.W)
 
-        themes = ttk.LabelFrame(settings_tab, text="状态颜色与行为（对所有任务灯生效）", padding=12)
-        themes.pack(fill=tk.X, pady=14)
+        themes_section = collapsible_section("状态颜色与行为（对所有任务灯生效）")
+        themes = ttk.LabelFrame(themes_section, text="任务状态样式", padding=12)
+        themes.pack(fill=tk.X)
         defaults = {
             TaskState.RUNNING: ((0, 90, 255), "呼吸", 50, 15),
             TaskState.WAITING: ((255, 150, 0), "常亮", 50, 15),
@@ -433,18 +504,18 @@ class WindowsDashboardApp:
             justify=tk.CENTER,
         ).pack(pady=(10, 0))
 
-        log_header = ttk.Frame(settings_tab)
+        log_section = collapsible_section("连接日志", expanded=False)
+        log_header = ttk.Frame(log_section)
         log_header.pack(fill=tk.X)
         ttk.Label(
             log_header,
             text="连接日志",
             font=("Microsoft YaHei UI", 10, "bold"),
         ).grid(row=0, column=0, sticky=tk.W)
-        ttk.Button(log_header, text="保存并生效", command=self._send, style="Apply.TButton").grid(row=0, column=1)
         ttk.Button(log_header, text="一键清空", command=self._clear_log).grid(row=0, column=2, sticky=tk.E)
         log_header.columnconfigure(1, weight=1)
         self._log = tk.Text(
-            settings_tab,
+            log_section,
             height=12,
             state=tk.DISABLED,
             font=("Cascadia Mono", 9),
@@ -557,6 +628,7 @@ class WindowsDashboardApp:
             remaining_percent=max(0, min(100, self._remaining.get())),
             period_used_percent=max(0, min(100, self._period_used.get())),
             master_brightness_percent=max(0, min(100, self._master_brightness.get())),
+            sleep_timeout_minutes=max(1, min(1440, self._sleep_timeout_minutes.get())),
             tasks=tasks,
             state_styles={
                 state: StateStyle(
@@ -591,6 +663,14 @@ class WindowsDashboardApp:
         ttk.Label(content, text="第一颗固定为系统灯，其余灯位自动用于任务。", foreground="#666666").grid(
             row=1, column=0, columnspan=2, sticky=tk.W, pady=(10, 16)
         )
+        ttk.Label(content, text="断连后休眠（分钟）").grid(row=2, column=0, sticky=tk.W)
+        sleep_value = tk.IntVar(value=self._sleep_timeout_minutes.get())
+        ttk.Spinbox(content, from_=1, to=1440, textvariable=sleep_value, width=8).grid(
+            row=2, column=1, padx=(12, 0)
+        )
+        ttk.Label(content, text="休眠后灯光和蓝牙全部关闭，短按 RESET 重新启动。", foreground="#666666").grid(
+            row=3, column=0, columnspan=2, sticky=tk.W, pady=(10, 16)
+        )
 
         def apply_and_close() -> None:
             try:
@@ -600,10 +680,16 @@ class WindowsDashboardApp:
             led_count = max(2, min(64, led_count))
             self._total_led_count.set(led_count)
             self._total_led_text.set(f"总灯数：{led_count}")
+            try:
+                sleep_minutes = max(1, min(1440, sleep_value.get()))
+            except tk.TclError:
+                sleep_minutes = self._sleep_timeout_minutes.get()
+            self._sleep_timeout_minutes.set(sleep_minutes)
+            self._save_sleep_timeout_minutes(sleep_minutes)
             dialog.destroy()
 
         buttons = ttk.Frame(content)
-        buttons.grid(row=2, column=0, columnspan=2, sticky=tk.E)
+        buttons.grid(row=4, column=0, columnspan=2, sticky=tk.E)
         ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(buttons, text="应用", command=apply_and_close).pack(side=tk.LEFT)
         dialog.bind("<Return>", lambda _event: apply_and_close())
@@ -735,6 +821,38 @@ class WindowsDashboardApp:
         scan_status_devices(self._post_scan_results, self._post_status)
         self._fit_dialog(dialog, 760, 520, 680, 460)
 
+    def _start_ota_update(self) -> None:
+        """选择应用固件并交给共享蓝牙核心写入备用 OTA 分区。"""
+        if self._worker is None or not self._worker.is_connected:
+            self._post_status("请先连接已绑定灯板再升级")
+            return
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="选择 ESP32-C3 应用固件",
+            filetypes=(("ESP32 固件", "*.bin"), ("所有文件", "*.*")),
+        )
+        if not path:
+            return
+        if "initial" in Path(path).stem.lower():
+            self._post_status("首次串口整包不能用于蓝牙升级，请选择 OTA 应用固件")
+            return
+        try:
+            firmware = Path(path).read_bytes()
+        except OSError as exc:
+            self._post_status(f"读取固件失败：{exc}")
+            return
+        if len(firmware) < 1024 or len(firmware) > 2 * 1024 * 1024:
+            self._post_status("固件文件大小无效")
+            return
+        if not messagebox.askyesno(
+            "蓝牙升级",
+            "升级期间请保持灯板供电和电脑蓝牙连接。校验完成后灯板会自动重启。\n\n现在开始吗？",
+            parent=self.root,
+        ):
+            return
+        self._worker.submit_ota(firmware)
+        self._post_status("蓝牙固件升级已开始")
+
     def _load_bound_device_id(self) -> str | None:
         try:
             data = json.loads(self._settings_path.read_text(encoding="utf-8"))
@@ -751,6 +869,22 @@ class WindowsDashboardApp:
             return {key: max(0, min(100, int(stored.get(key, value)))) for key, value in defaults.items()}
         except (OSError, ValueError, TypeError, AttributeError):
             return defaults
+
+    def _load_sleep_timeout_minutes(self) -> int:
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+            return max(1, min(1440, int(data.get("sleep_timeout_minutes", 10))))
+        except (OSError, ValueError, TypeError):
+            return 10
+
+    def _save_sleep_timeout_minutes(self, minutes: int) -> None:
+        self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            data = {}
+        data["sleep_timeout_minutes"] = max(1, min(1440, int(minutes)))
+        self._settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _update_busy_formula_text(self) -> None:
         values = {key: max(0, min(100, int(value.get()))) for key, value in self._busy_weight_vars.items()}
@@ -879,16 +1013,33 @@ class WindowsDashboardApp:
             state_enum = TaskState[record["state"].upper()]
             color = self._style_colors.get(state_enum, (0, 0, 0))
             effect = self._style_effects[state_enum].get() if state_enum in self._style_effects else "熄灭"
-            lamp_effect = effect
+            # Treeview 普通数据列不能直接承载逐格图片，用高辨识度色点展示当前 RGB 色系。
+            red, green, blue = color
+            if max(color) < 35:
+                color_dot = "⚫"
+            elif max(color) - min(color) < 35:
+                color_dot = "⚪"
+            elif red >= green * 1.5 and red >= blue * 1.5:
+                color_dot = "🔴"
+            elif green >= red * 1.35 and green >= blue * 1.25:
+                color_dot = "🟢"
+            elif blue >= red * 1.25 and blue >= green * 1.25:
+                color_dot = "🔵"
+            elif red >= 180 and green >= 120 and blue < 100:
+                color_dot = "🟡" if green >= 180 else "🟠"
+            else:
+                color_dot = "🟣"
+            lamp_effect = f"{color_dot}  {effect}"
             task_capacity = max(1, self._total_led_count.get() - 1)
             actual_position = position_by_task_id[str(record["task_id"])]
             led_position: object = actual_position if actual_position <= task_capacity else "未分配"
-            checked = "☑  已选" if str(record["task_id"]) in self._checked_task_ids else "☐  选择"
-            pin_text = "📌 已固定" if record.get("pinned") else "○ 固定"
+            checked = "☑" if str(record["task_id"]) in self._checked_task_ids else "☐"
+            # 三个操作紧凑排列：复选框、拖拽点阵、图钉。固定后用黄色标记强化状态。
+            pin_text = "🟡📌" if record.get("pinned") else "⚪📍"
             tree.insert(
                 "", tk.END, iid=iid,
-                text=f"{checked}    ⠿ 拖动    {pin_text}",
-                values=(led_position, lamp_effect, record["title"], state, record["summary"], record["source"]),
+                text=f"{checked}   ⠿   {pin_text}",
+                values=(led_position, lamp_effect, record["title"], state, record["source"]),
             )
 
     def _begin_task_drag(self, event: tk.Event) -> str | None:
@@ -906,7 +1057,7 @@ class WindowsDashboardApp:
             return None
         bounds = tree.bbox(row, "#0")
         relative_x = event.x - bounds[0] if bounds else 0
-        if relative_x >= 120 and task_id:
+        if relative_x >= 70 and task_id:
             record = self._status_records.get(row, {})
             # 固定前先把当前自动排序写入灯位，避免点击固定后任务跳到旧位置。
             current_order = [str(item["task_id"]) for item in self._event_store.latest_records(500)]
@@ -914,14 +1065,14 @@ class WindowsDashboardApp:
             self._event_store.set_pinned(task_id, not bool(record.get("pinned")))
             self._refresh_status_page()
             return "break"
-        if relative_x < 72 and task_id:
+        if relative_x < 35 and task_id:
             if task_id in self._checked_task_ids:
                 self._checked_task_ids.remove(task_id)
             else:
                 self._checked_task_ids.add(task_id)
             self._refresh_status_page()
             return "break"
-        if relative_x >= 120:
+        if relative_x >= 70:
             return "break"
         self._drag_task_item = row
         tree.focus(row)

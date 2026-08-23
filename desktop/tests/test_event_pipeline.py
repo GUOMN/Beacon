@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +33,22 @@ class EventPipelineTests(unittest.TestCase):
             store.record(event)
             with store._connect() as database:
                 self.assertEqual(database.execute("SELECT COUNT(*) FROM task_events").fetchone()[0], 1)
+
+    def test_old_summary_column_is_removed_during_migration(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            path = Path(folder) / "old.sqlite"
+            with sqlite3.connect(path) as database:
+                database.execute(
+                    "CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, title TEXT, state TEXT, "
+                    "progress INTEGER, source TEXT, summary TEXT, occurred_at_ms INTEGER)"
+                )
+                database.execute(
+                    "CREATE TABLE task_layout (task_id TEXT PRIMARY KEY, display_order INTEGER, hidden INTEGER)"
+                )
+            store = StatusEventStore(path)
+            with store._connect() as database:
+                columns = {row[1] for row in database.execute("PRAGMA table_info(task_events)")}
+            self.assertNotIn("summary", columns)
 
     def test_hook_install_preserves_existing_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
@@ -77,7 +94,7 @@ class EventPipelineTests(unittest.TestCase):
             with store._connect() as database:
                 self.assertEqual(database.execute("SELECT COUNT(*) FROM task_usage WHERE task_id='one'").fetchone()[0], 0)
 
-    def test_codex_live_events_map_to_task_states_and_summary(self) -> None:
+    def test_codex_live_events_map_to_task_states(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             store = StatusEventStore(Path(folder) / "events.sqlite")
             source = CodexSessionSource(store, lambda _message: None)
@@ -86,10 +103,8 @@ class EventPipelineTests(unittest.TestCase):
             source._consume("thread", {"type": "event_msg", "payload": {"type": "task_started"}})
             record = store.latest_records()[0]
             self.assertEqual(record["state"], "running")
-            self.assertEqual(record["summary"], "实现 蓝牙 状态灯")
             source._consume("thread", {"type": "event_msg", "payload": {"type": "task_complete"}})
             self.assertEqual(store.latest_records()[0]["state"], "success")
-            self.assertEqual(store.latest_records()[0]["summary"], "实现 蓝牙 状态灯")
 
 
 if __name__ == "__main__":

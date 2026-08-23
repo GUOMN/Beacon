@@ -31,6 +31,8 @@ esp_err_t dashboard_status_load_saved_styles(void);
 
 // 设置一颗业务灯；进度范围为 0~100
 esp_err_t dashboard_status_set(uint8_t led_index, panel_state_t state, uint8_t progress);
+esp_err_t dashboard_status_set_with_period(uint8_t led_index, panel_state_t state,
+                                           uint8_t progress, uint16_t period_ms);
 
 // 第一颗灯：颜色表示剩余百分比，呼吸速度表示短周期已用百分比
 esp_err_t dashboard_status_set_usage(uint8_t remaining_percent,

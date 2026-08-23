@@ -5,6 +5,17 @@ from codex_status_core.protocol import BLEProtocol
 
 
 class BLEProtocolTests(unittest.TestCase):
+    def test_sleep_timeout_packet(self) -> None:
+        self.assertEqual(BLEProtocol.encode_sleep_timeout(7, 10), bytes((0xC3, 1, 9, 7, 10, 0)))
+        with self.assertRaises(ValueError):
+            BLEProtocol.encode_sleep_timeout(0, 0)
+
+    def test_ota_packets(self) -> None:
+        self.assertEqual(BLEProtocol.encode_ota_start(0x123456), bytes((1, 0x56, 0x34, 0x12, 0)))
+        self.assertEqual(BLEProtocol.encode_ota_data(b"abc"), b"\x02abc")
+        self.assertEqual(BLEProtocol.encode_ota_finish(), b"\x03")
+        self.assertEqual(BLEProtocol.encode_ota_abort(), b"\x04")
+
     def test_snapshot_is_exactly_sixteen_bytes(self) -> None:
         snapshot = DashboardSnapshot(
             master_brightness_percent=60,
@@ -40,7 +51,12 @@ class BLEProtocolTests(unittest.TestCase):
         self.assertEqual(len(BLEProtocol.encode_panel_header(1, snapshot)), 7)
         self.assertEqual(
             BLEProtocol.encode_task_state(2, 0, snapshot.tasks[0]),
-            bytes((0xC3, 1, 6, 2, 0, 0, 0)),
+            bytes((0xC3, 1, 6, 2, 0, 0, 0, 0, 0)),
+        )
+        active = TaskSlot("大任务", TaskState.RUNNING, 0, animation_period_ms=850)
+        self.assertEqual(
+            BLEProtocol.encode_task_state(3, 1, active)[-2:],
+            bytes((850 & 0xFF, 850 >> 8)),
         )
 
     def test_state_style_packet(self) -> None:

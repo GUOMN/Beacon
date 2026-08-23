@@ -4,4 +4,4 @@ idf_component_register(SRCS "main.c"
                             "dashboard_status.c"
                             "ble_status_service.c"
                        INCLUDE_DIRS "."
-                       REQUIRES bt nvs_flash)
+                       REQUIRES bt nvs_flash app_update)

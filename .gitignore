@@ -13,6 +13,7 @@ desktop/.venv/
 desktop/**/__pycache__/
 desktop/build/
 desktop/dist/
+desktop/artifacts/
 dist/
 *.pyc
 
