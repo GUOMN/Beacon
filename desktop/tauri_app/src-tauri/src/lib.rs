@@ -1,8 +1,9 @@
 use serde_json::Value;
 use std::{io::{BufRead, BufReader, Write}, path::PathBuf, process::{Child, ChildStdin, ChildStdout, Command, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering}}};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use btleplug::api::{Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType};
+use btleplug::api::{Central, CentralEvent, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType};
 use btleplug::platform::{Adapter as BleAdapter, Manager as BleManager, Peripheral as BlePeripheral};
+use futures::stream::StreamExt;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 use tauri::{Manager, WindowEvent};
@@ -246,6 +247,42 @@ async fn discovered_status_boards(adapters: &[BleAdapter]) -> Result<(Vec<Value>
     Ok((devices, observed, candidates, unresolved))
 }
 
+async fn scan_macos_event_stream(
+    adapter: &BleAdapter,
+    deadline: tokio::time::Instant,
+) -> Result<(Vec<Value>, usize, usize, usize), String> {
+    // CoreBluetooth reports discoveries as an event stream. Polling the
+    // adapter cache alone can remain empty on macOS even while another native
+    // client sees the same advertisement, so subscribe before starting one
+    // uninterrupted, unfiltered scan.
+    let mut events = adapter.events().await
+        .map_err(|error| format!("订阅蓝牙发现事件失败：{error}"))?;
+    adapter.start_scan(ScanFilter::default()).await
+        .map_err(|error| format!("启动蓝牙扫描失败：{error}"))?;
+
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline { break; }
+        let remaining = deadline - now;
+        match tokio::time::timeout(remaining, events.next()).await {
+            Ok(Some(CentralEvent::DeviceDiscovered(_)
+                | CentralEvent::DeviceUpdated(_)
+                | CentralEvent::ServicesAdvertisement { .. })) => {
+                let found = discovered_status_boards(std::slice::from_ref(adapter)).await?;
+                if !found.0.is_empty() {
+                    let _ = adapter.stop_scan().await;
+                    return Ok(found);
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    let found = discovered_status_boards(std::slice::from_ref(adapter)).await?;
+    let _ = adapter.stop_scan().await;
+    Ok(found)
+}
+
 fn start_bridge_process() -> Result<BridgeProcess, String> {
     if let Some(binary) = bundled_bridge() {
         let working_dir = binary.parent().ok_or("内置后台路径无效")?.to_path_buf();
@@ -363,6 +400,16 @@ async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, St
     let started_at = tokio::time::Instant::now();
     let deadline = started_at
         + std::time::Duration::from_secs(if macos { 30 } else { 4 });
+    if macos {
+        let (devices, observed_count, candidate_count, unresolved_count) =
+            scan_macos_event_stream(&adapters[0], deadline).await?;
+        return Ok(serde_json::json!({
+            "devices": devices,
+            "observed_count": observed_count,
+            "candidate_count": candidate_count,
+            "unresolved_count": unresolved_count,
+        }));
+    }
     let fallback_at = started_at + std::time::Duration::from_secs(12);
     let mut restart_at = tokio::time::Instant::now();
     let mut last_start_error: Option<String> = None;
