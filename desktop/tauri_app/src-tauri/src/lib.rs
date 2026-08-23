@@ -31,17 +31,71 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 fn bridge_script() -> Result<PathBuf, String> {
-    [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tauri_bridge.py"),
-        std::env::current_exe()
-            .map_err(|error| error.to_string())?
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join("resources/tauri_bridge.py"),
-    ]
-    .into_iter()
-    .find(|path| path.is_file())
-    .ok_or_else(|| "找不到 Python 后台桥接脚本，请重新安装客户端".to_string())
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut candidates = vec![executable
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("resources/tauri_bridge.py")];
+    if cfg!(debug_assertions) {
+        candidates.insert(
+            0,
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tauri_bridge.py"),
+        );
+    }
+    if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
+        return Ok(path);
+    }
+    materialize_embedded_bridge()
+}
+
+fn materialize_embedded_bridge() -> Result<PathBuf, String> {
+    const FILES: &[(&str, &[u8])] = &[
+        ("tauri_bridge.py", include_bytes!("../../../tauri_bridge.py")),
+        (
+            "codex_status_core/__init__.py",
+            include_bytes!("../../../codex_status_core/__init__.py"),
+        ),
+        (
+            "codex_status_core/codex_session_source.py",
+            include_bytes!("../../../codex_status_core/codex_session_source.py"),
+        ),
+        (
+            "codex_status_core/event_store.py",
+            include_bytes!("../../../codex_status_core/event_store.py"),
+        ),
+        (
+            "codex_status_core/hook_adapter.py",
+            include_bytes!("../../../codex_status_core/hook_adapter.py"),
+        ),
+        (
+            "codex_status_core/hook_manager.py",
+            include_bytes!("../../../codex_status_core/hook_manager.py"),
+        ),
+        (
+            "codex_status_core/models.py",
+            include_bytes!("../../../codex_status_core/models.py"),
+        ),
+        (
+            "codex_status_core/protocol.py",
+            include_bytes!("../../../codex_status_core/protocol.py"),
+        ),
+    ];
+    let directory = std::env::temp_dir()
+        .join("Beacon")
+        .join(format!("bridge-{}", env!("CARGO_PKG_VERSION")));
+    for (relative, contents) in FILES {
+        let path = directory.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("创建免安装版后台目录失败：{error}"))?;
+        }
+        let current = std::fs::read(&path).ok();
+        if current.as_deref() != Some(*contents) {
+            std::fs::write(&path, contents)
+                .map_err(|error| format!("释放免安装版后台文件失败：{error}"))?;
+        }
+    }
+    Ok(directory.join("tauri_bridge.py"))
 }
 
 #[cfg(target_os = "macos")]
@@ -62,17 +116,20 @@ fn bundled_bridge() -> Option<PathBuf> {
 
 #[cfg(windows)]
 fn bundled_bridge() -> Option<PathBuf> {
-    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries/bridge-x86_64.exe");
     let executable = std::env::current_exe().ok()?;
     let directory = executable.parent()?;
-    [
-        development,
+    let mut candidates = vec![
         directory.join("binaries/bridge-x86_64.exe"),
         directory.join("resources/binaries/bridge-x86_64.exe"),
         directory.join("bridge-x86_64.exe"),
-    ]
-    .into_iter()
-    .find(|path| path.is_file())
+    ];
+    if cfg!(debug_assertions) {
+        candidates.insert(
+            0,
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries/bridge-x86_64.exe"),
+        );
+    }
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 #[cfg(all(not(target_os = "macos"), not(windows)))]
@@ -225,6 +282,12 @@ const GAP_DEVICE_NAME_UUID: &str = "00002a00-0000-1000-8000-00805f9b34fb";
 
 #[cfg(not(target_os = "macos"))]
 fn status_scan_filter() -> Result<ScanFilter, String> {
+    // Windows' Bluetooth stack does not reliably expose 128-bit advertised
+    // services to the WinRT watcher filter. Scan broadly there, then keep the
+    // existing name/service checks below to select Beacon boards.
+    if cfg!(windows) {
+        return Ok(ScanFilter::default());
+    }
     Ok(ScanFilter {
         services: vec![Uuid::parse_str(SERVICE_UUID).map_err(|error| error.to_string())?],
     })
@@ -499,6 +562,8 @@ fn start_bridge_process() -> Result<BridgeProcess, String> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
         let mut child = command
             .spawn()
             .map_err(|error| format!("内置后台启动失败：{error}"))?;
@@ -1090,6 +1155,31 @@ async fn bridge_action(
     })
     .await
     .map_err(|error| format!("后台任务异常：{error}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_portable_bridge_contains_required_sources() {
+        let script = materialize_embedded_bridge().expect("embedded bridge should materialize");
+        assert!(script.is_file());
+        assert!(script
+            .parent()
+            .expect("bridge directory")
+            .join("codex_status_core/hook_manager.py")
+            .is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_scans_without_service_filter() {
+        assert!(status_scan_filter()
+            .expect("Windows scan filter")
+            .services
+            .is_empty());
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
