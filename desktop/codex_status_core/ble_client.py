@@ -143,7 +143,6 @@ class DashboardBLEClient:
                     BLEProtocol.encode_task_state(self._sequence, task_index, task),
                     response=True,
                 )
-            self._status_callback("六灯状态已发送")
 
     async def _ota_loop(self, client: BleakClient) -> None:
         while True:

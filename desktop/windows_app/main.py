@@ -58,6 +58,8 @@ class WindowsDashboardApp:
         self._status_task_ids: dict[str, str] = {}
         self._status_records: dict[str, dict[str, object]] = {}
         self._lamp_color_images: dict[tuple[int, int, int], tk.PhotoImage] = {}
+        self._operation_icons: dict[tuple[bool, bool], tk.PhotoImage] = {}
+        self._lamp_swatch_labels: dict[str, tk.Label] = {}
         self._checked_task_ids: set[str] = set()
         self._state_filters = {
             state: tk.BooleanVar(value=True)
@@ -118,6 +120,8 @@ class WindowsDashboardApp:
         style.configure(".", font=("Microsoft YaHei UI", 10))
         style.configure("TFrame", background="#F7F7F7")
         style.configure("TLabel", background="#F7F7F7", foreground="#252525")
+        style.configure("Settings.TFrame", background="#F3F3F1")
+        style.configure("Card.TFrame", background="#FAFAF8")
         style.configure(
             "Section.TButton",
             background="#FFFFFF",
@@ -131,6 +135,16 @@ class WindowsDashboardApp:
             font=("Microsoft YaHei UI", 10, "bold"),
         )
         style.map("Section.TButton", background=[("active", "#F0F0EC")])
+        style.configure(
+            "Modern.Vertical.TScrollbar",
+            background="#C9C9C5",
+            troughcolor="#F3F3F1",
+            bordercolor="#F3F3F1",
+            arrowcolor="#777773",
+            gripcount=0,
+            width=10,
+        )
+        style.map("Modern.Vertical.TScrollbar", background=[("active", "#AFAFAA")])
         style.configure(
             "TLabelframe",
             background="#F7F7F7",
@@ -317,14 +331,19 @@ class WindowsDashboardApp:
         self._status_tree.bind("<ButtonPress-1>", self._begin_task_drag, add="+")
         self._status_tree.bind("<B1-Motion>", self._move_task_drag, add="+")
         self._status_tree.bind("<ButtonRelease-1>", self._finish_task_drag, add="+")
+        self._status_tree.bind("<Configure>", lambda _event: self.root.after_idle(self._position_lamp_swatches), add="+")
+        self._status_tree.bind("<MouseWheel>", lambda _event: self.root.after_idle(self._position_lamp_swatches), add="+")
 
         # 设置项较多，使用画布承载可滚动内容，避免小窗口下底部配置被裁掉。
-        settings_canvas = tk.Canvas(settings_tab, highlightthickness=0, background="#F7F7F5")
-        settings_scrollbar = ttk.Scrollbar(settings_tab, orient=tk.VERTICAL, command=settings_canvas.yview)
+        settings_canvas = tk.Canvas(settings_tab, highlightthickness=0, background="#F3F3F1")
+        settings_scrollbar = ttk.Scrollbar(
+            settings_tab, orient=tk.VERTICAL, command=settings_canvas.yview,
+            style="Modern.Vertical.TScrollbar",
+        )
         settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
         settings_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         settings_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        settings_content = ttk.Frame(settings_canvas, padding=16)
+        settings_content = ttk.Frame(settings_canvas, padding=18, style="Settings.TFrame")
         settings_window = settings_canvas.create_window((0, 0), window=settings_content, anchor=tk.NW)
 
         def refresh_settings_scroll(_event: object = None) -> None:
@@ -343,16 +362,19 @@ class WindowsDashboardApp:
 
         def collapsible_section(title: str, *, expanded: bool = True) -> ttk.Frame:
             """创建可独立折叠的设置区块，返回用于放置实际控件的内容容器。"""
-            section = ttk.Frame(settings_content)
-            section.pack(fill=tk.X, pady=(0, 10))
-            body = ttk.Frame(section)
+            section = tk.Frame(
+                settings_content, background="#FFFFFF", borderwidth=0,
+                highlightthickness=1, highlightbackground="#DEDEDA",
+            )
+            section.pack(fill=tk.X, pady=(0, 12))
+            body = ttk.Frame(section, padding=(14, 6, 14, 14), style="Card.TFrame")
             opened = tk.BooleanVar(value=expanded)
             toggle = ttk.Button(section, style="Section.TButton")
 
             def apply_state() -> None:
                 toggle.configure(text=("▾  " if opened.get() else "▸  ") + title)
                 if opened.get():
-                    body.pack(fill=tk.X, pady=(5, 0))
+                    body.pack(fill=tk.X)
                 else:
                     body.pack_forget()
                 settings_content.after_idle(refresh_settings_scroll)
@@ -376,10 +398,7 @@ class WindowsDashboardApp:
         ttk.Button(settings_header, text="灯带颜色校准", command=self._open_calibration).pack(
             side=tk.RIGHT, padx=(0, 8)
         )
-        ttk.Button(settings_header, text="保存并生效", command=self._send, style="Apply.TButton").pack(
-            side=tk.RIGHT, padx=(0, 8)
-        )
-        ttk.Button(settings_header, text="蓝牙升级", command=self._start_ota_update).pack(
+        ttk.Button(settings_header, text="保存并生效", command=lambda: self._send(human_action=True), style="Apply.TButton").pack(
             side=tk.RIGHT, padx=(0, 8)
         )
 
@@ -615,7 +634,7 @@ class WindowsDashboardApp:
         self._fit_dialog(dialog, 780, 520, 620, 420)
         dialog.grab_set()
 
-    def _send(self) -> None:
+    def _send(self, *, human_action: bool = False) -> None:
         # 主界面不再人工编辑任务。发送时保留外部数据源已有状态，新增灯位默认空闲。
         task_count = max(1, min(63, self._total_led_count.get() - 1))
         tasks = []
@@ -644,6 +663,8 @@ class WindowsDashboardApp:
             self._post_status("尚未绑定灯板，请先在设备管理中选择并绑定")
             return
         self._worker.submit(copy.deepcopy(self._snapshot))
+        if human_action:
+            self._post_status("灯板配置已下发")
 
     def _open_led_settings(self) -> None:
         """打开二级设置窗口；这里只配置物理灯带总灯数。"""
@@ -801,6 +822,10 @@ class WindowsDashboardApp:
                 text="取消绑定" if is_bound else "绑定选中设备",
                 style="Danger.TButton" if is_bound else "Primary.TButton",
             )
+            if is_bound:
+                ota_button.pack(side=tk.RIGHT, padx=8, before=bind_button)
+            else:
+                ota_button.pack_forget()
 
         actions = ttk.Frame(outer)
         actions.pack(fill=tk.X, pady=(12, 0))
@@ -817,6 +842,7 @@ class WindowsDashboardApp:
         bind_button.pack(
             side=tk.RIGHT, padx=8
         )
+        ota_button = ttk.Button(actions, text="固件升级", command=self._start_ota_update)
         tree.bind("<<TreeviewSelect>>", update_actions)
         scan_status_devices(self._post_scan_results, self._post_status)
         self._fit_dialog(dialog, 760, 520, 680, 460)
@@ -991,10 +1017,64 @@ class WindowsDashboardApp:
             state_filter.set(enabled)
         self._state_filter_changed()
 
+    def _operation_icon(self, checked: bool, pinned: bool) -> tk.PhotoImage:
+        """绘制稳定的操作区图标，避免彩色 Emoji 在不同 Windows 字体下错位。"""
+        key = (checked, pinned)
+        cached = self._operation_icons.get(key)
+        if cached is not None:
+            return cached
+        image = tk.PhotoImage(width=104, height=24)
+        image.put("#FFFFFF", to=(0, 0, 104, 24))
+        # 复选框。
+        image.put("#AEB4BE", to=(5, 4, 23, 20))
+        image.put("#FFFFFF", to=(7, 6, 21, 18))
+        if checked:
+            image.put("#2563EB", to=(7, 6, 21, 18))
+            for x, y in ((10, 12), (11, 13), (12, 14), (13, 13), (14, 12), (15, 11), (16, 10), (17, 9)):
+                image.put("#FFFFFF", to=(x, y, x + 2, y + 2))
+        # 拖动点阵。
+        for x in (39, 46):
+            for y in (7, 12, 17):
+                image.put("#89919E", to=(x, y, x + 3, y + 3))
+        # 独立图钉按钮：固定后以黄色背景和倾斜图钉明确高亮。
+        button_fill = "#FFF1A8" if pinned else "#FFFFFF"
+        button_border = "#E0B100" if pinned else "#C7CCD4"
+        image.put(button_border, to=(67, 2, 102, 22))
+        image.put(button_fill, to=(69, 4, 100, 20))
+        pin_color = "#A66A00" if pinned else "#68707C"
+        if pinned:
+            image.put(pin_color, to=(79, 7, 91, 10))
+            image.put(pin_color, to=(87, 9, 90, 14))
+            image.put(pin_color, to=(85, 12, 88, 16))
+            image.put(pin_color, to=(82, 15, 86, 18))
+        else:
+            image.put(pin_color, to=(80, 6, 91, 9))
+            image.put(pin_color, to=(83, 9, 88, 14))
+            image.put(pin_color, to=(81, 14, 90, 16))
+            image.put(pin_color, to=(85, 16, 87, 20))
+        self._operation_icons[key] = image
+        return image
+
+    def _position_lamp_swatches(self) -> None:
+        """把真实 RGB 色块覆盖到当前灯效单元格，并跟随表格滚动。"""
+        tree = self._status_tree
+        if tree is None:
+            return
+        for iid, label in self._lamp_swatch_labels.items():
+            bounds = tree.bbox(iid, "effect")
+            if not bounds:
+                label.place_forget()
+                continue
+            x, y, _width, height = bounds
+            label.place(x=x + 10, y=y + max(3, (height - 14) // 2), width=18, height=14)
+
     def _refresh_status_page(self) -> None:
         tree = self._status_tree
         if tree is None or not tree.winfo_exists():
             return
+        for label in self._lamp_swatch_labels.values():
+            label.destroy()
+        self._lamp_swatch_labels.clear()
         records = self._event_store.latest_records(500)
         position_by_task_id = {
             str(record["task_id"]): index + 1
@@ -1013,34 +1093,22 @@ class WindowsDashboardApp:
             state_enum = TaskState[record["state"].upper()]
             color = self._style_colors.get(state_enum, (0, 0, 0))
             effect = self._style_effects[state_enum].get() if state_enum in self._style_effects else "熄灭"
-            # Treeview 普通数据列不能直接承载逐格图片，用高辨识度色点展示当前 RGB 色系。
-            red, green, blue = color
-            if max(color) < 35:
-                color_dot = "⚫"
-            elif max(color) - min(color) < 35:
-                color_dot = "⚪"
-            elif red >= green * 1.5 and red >= blue * 1.5:
-                color_dot = "🔴"
-            elif green >= red * 1.35 and green >= blue * 1.25:
-                color_dot = "🟢"
-            elif blue >= red * 1.25 and blue >= green * 1.25:
-                color_dot = "🔵"
-            elif red >= 180 and green >= 120 and blue < 100:
-                color_dot = "🟡" if green >= 180 else "🟠"
-            else:
-                color_dot = "🟣"
-            lamp_effect = f"{color_dot}  {effect}"
+            lamp_effect = f"       {effect}"
             task_capacity = max(1, self._total_led_count.get() - 1)
             actual_position = position_by_task_id[str(record["task_id"])]
             led_position: object = actual_position if actual_position <= task_capacity else "未分配"
-            checked = "☑" if str(record["task_id"]) in self._checked_task_ids else "☐"
-            # 三个操作紧凑排列：复选框、拖拽点阵、图钉。固定后用黄色标记强化状态。
-            pin_text = "🟡📌" if record.get("pinned") else "⚪📍"
+            checked = str(record["task_id"]) in self._checked_task_ids
+            pinned = bool(record.get("pinned"))
             tree.insert(
                 "", tk.END, iid=iid,
-                text=f"{checked}   ⠿   {pin_text}",
+                text="",
+                image=self._operation_icon(checked, pinned),
                 values=(led_position, lamp_effect, record["title"], state, record["source"]),
             )
+            self._lamp_swatch_labels[iid] = tk.Label(
+                tree, background=self._hex_color(color), borderwidth=1, relief=tk.SOLID,
+            )
+        self.root.after_idle(self._position_lamp_swatches)
 
     def _begin_task_drag(self, event: tk.Event) -> str | None:
         tree = self._status_tree
@@ -1270,8 +1338,19 @@ class WindowsDashboardApp:
         system.pack(fill=tk.X)
         remaining = tk.IntVar(value=self._remaining.get())
         period_used = tk.IntVar(value=self._period_used.get())
-        self._add_scale(system, "总体额度剩余", remaining, 0)
-        self._add_scale(system, "短时繁忙程度", period_used, 1)
+        def add_preview_scale(label: str, variable: tk.IntVar, row: int) -> None:
+            item = ttk.Frame(system)
+            item.grid(row=row, column=0, sticky=tk.EW, pady=(3, 7))
+            item.columnconfigure(0, weight=1)
+            ttk.Label(item, text=label).grid(row=0, column=0, sticky=tk.W)
+            ttk.Label(item, textvariable=variable, width=4, anchor=tk.E).grid(row=0, column=1, sticky=tk.E)
+            ttk.Label(item, text="%", foreground="#666666").grid(row=0, column=2, sticky=tk.E)
+            ttk.Scale(item, from_=0, to=100, variable=variable, orient=tk.HORIZONTAL).grid(
+                row=1, column=0, columnspan=3, sticky=tk.EW, pady=(4, 0)
+            )
+
+        add_preview_scale("总体额度剩余", remaining, 0)
+        add_preview_scale("短时繁忙程度", period_used, 1)
         ttk.Label(
             system,
             text=(
@@ -1280,8 +1359,8 @@ class WindowsDashboardApp:
             ),
             foreground="#666666",
             justify=tk.LEFT,
-        ).grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
-        system.columnconfigure(1, weight=1)
+        ).grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
+        system.columnconfigure(0, weight=1)
 
         task_frame = ttk.LabelFrame(outer, text="任务灯状态预览", padding=10)
         task_frame.pack(fill=tk.BOTH, expand=True, pady=12)
@@ -1503,6 +1582,17 @@ class WindowsDashboardApp:
     def _post_status(self, message: str) -> None:
         self._events.put(message)
 
+    @staticmethod
+    def _should_log_message(message: str) -> bool:
+        """日志只记录用户可感知的管理操作，不记录任务刷新、心跳等后台流量。"""
+        prefixes = (
+            "正在扫描", "扫描完成", "扫描失败", "蓝牙已连接", "蓝牙已断开",
+            "正在连接选中", "识别命令", "识别失败", "灯板配置已下发",
+            "蓝牙固件升级", "蓝牙升级", "固件校验", "提交固件升级失败",
+            "已绑定", "已取消绑定",
+        )
+        return message.startswith(prefixes)
+
     def _clear_log(self) -> None:
         """只清空界面日志，不改变蓝牙连接和灯板配置。"""
         self._log.configure(state=tk.NORMAL)
@@ -1592,11 +1682,12 @@ class WindowsDashboardApp:
                         "bound_device",
                         values=("已绑定灯板（当前离线）", self._bound_device_id, "--", "离线"),
                     )
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            self._log.configure(state=tk.NORMAL)
-            self._log.insert(tk.END, f"{timestamp}  {message}\n")
-            self._log.see(tk.END)
-            self._log.configure(state=tk.DISABLED)
+            if self._should_log_message(message):
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                self._log.configure(state=tk.NORMAL)
+                self._log.insert(tk.END, f"{timestamp}  {message}\n")
+                self._log.see(tk.END)
+                self._log.configure(state=tk.DISABLED)
         self.root.after(100, self._drain_events)
 
     def _hide_to_tray(self) -> None:
