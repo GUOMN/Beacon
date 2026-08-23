@@ -46,7 +46,10 @@ jobs:
         run: pnpm tauri build --target aarch64-apple-darwin --bundles dmg
 
       - name: Verify ARM64 executable
-        run: file "desktop/tauri_app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Codex Status Bridge.app/Contents/MacOS/codex-status-bridge" | grep -q arm64
+        run: |
+          EXECUTABLE="$(find desktop/tauri_app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos -type f -path '*/Contents/MacOS/*' -perm +111 | head -n 1)"
+          test -n "$EXECUTABLE"
+          file "$EXECUTABLE" | tee /dev/stderr | grep -q arm64
 
       - name: Upload temporary DMG artifact
         uses: actions/upload-artifact@v4
