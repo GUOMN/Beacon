@@ -36,8 +36,8 @@ class StateStyle:
     def validate(self) -> None:
         if len(self.color) != 3 or any(channel < 0 or channel > 255 for channel in self.color):
             raise ValueError("RGB 颜色无效")
-        if not 1 <= self.effect <= 3:
-            raise ValueError("灯效必须是常亮、闪烁或呼吸")
+        if not 1 <= self.effect <= 4:
+            raise ValueError("灯效必须是常亮、闪烁、呼吸或双闪")
         if self.effect != 1 and not 200 <= self.period_ms <= 10000:
             raise ValueError("动画周期必须在 200~10000 毫秒之间")
         if self.effect == 2 and not 1 <= self.blink_duty_percent <= 100:
@@ -68,6 +68,7 @@ class DashboardSnapshot:
     master_brightness_percent: int = 60
     sleep_timeout_minutes: int = 10
     output_channels: int = 1
+    system_effect: int = 4
     state_styles: dict[TaskState, StateStyle] = field(default_factory=dict)
     tasks: list[TaskSlot] = field(
         default_factory=lambda: [TaskSlot(f"任务 {index + 1}") for index in range(5)]
@@ -84,6 +85,8 @@ class DashboardSnapshot:
             raise ValueError("断连休眠时间必须在 1~1440 分钟之间")
         if self.output_channels not in (1, 2):
             raise ValueError("灯带通道数必须是 1 或 2")
+        if not 1 <= self.system_effect <= 4:
+            raise ValueError("系统灯效必须是常亮、闪烁、呼吸或双闪")
         if not 1 <= len(self.tasks) <= 63:
             raise ValueError("任务灯数量必须在 1~63 之间")
         for task in self.tasks:

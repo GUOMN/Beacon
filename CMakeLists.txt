@@ -5,5 +5,5 @@ cmake_minimum_required(VERSION 3.16)
 set(CCACHE_ENABLE 0 CACHE BOOL "Disable ccache for this project" FORCE)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-set(PROJECT_VER "0.2.2")
+set(PROJECT_VER "0.2.3")
 project(ws2812_status)

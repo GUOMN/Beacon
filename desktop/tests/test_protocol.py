@@ -10,6 +10,9 @@ class BLEProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             BLEProtocol.encode_sleep_timeout(0, 0)
 
+    def test_system_effect_packet(self) -> None:
+        self.assertEqual(BLEProtocol.encode_system_effect(8, 4), bytes((0xC3, 1, 11, 8, 4)))
+
     def test_ota_packets(self) -> None:
         self.assertEqual(BLEProtocol.encode_ota_start(0x123456), bytes((1, 0x56, 0x34, 0x12, 0)))
         self.assertEqual(BLEProtocol.encode_ota_data(b"abc"), b"\x02abc")
@@ -64,6 +67,10 @@ class BLEProtocolTests(unittest.TestCase):
         self.assertEqual(
             BLEProtocol.encode_state_style(3, 1, (10, 20, 30), 3, 1500, 20),
             bytes((0xC3, 1, 5, 3, 1, 10, 20, 30, 3, 0xDC, 0x05, 20)),
+        )
+        self.assertEqual(
+            BLEProtocol.encode_state_style(4, 5, (255, 0, 0), 4, 1800, 15)[8],
+            4,
         )
 
 

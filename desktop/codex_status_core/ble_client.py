@@ -159,6 +159,13 @@ class DashboardBLEClient:
                     raise RuntimeError(
                         "当前灯板固件不支持双通道，请先升级固件"
                     ) from exc
+            if self._supports_system_effect():
+                self._sequence = (self._sequence + 1) & 0xFF
+                await client.write_gatt_char(
+                    BLEProtocol.CONTROL_UUID,
+                    BLEProtocol.encode_system_effect(self._sequence, snapshot.system_effect),
+                    response=True,
+                )
             for state, style in snapshot.state_styles.items():
                 self._sequence = (self._sequence + 1) & 0xFF
                 await client.write_gatt_char(
@@ -192,6 +199,14 @@ class DashboardBLEClient:
             version = self._firmware_info.split("|", 1)[0].lstrip("vV")
             parts = tuple(int(part) for part in version.split(".")[:3])
             return parts >= (0, 2, 1)
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    def _supports_system_effect(self) -> bool:
+        try:
+            version = self._firmware_info.split("|", 1)[0].lstrip("vV")
+            parts = tuple(int(part) for part in version.split(".")[:3])
+            return parts >= (0, 2, 3)
         except (AttributeError, TypeError, ValueError):
             return False
 

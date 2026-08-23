@@ -11,6 +11,7 @@ typedef enum {
     LED_EFFECT_SOLID,
     LED_EFFECT_BLINK,
     LED_EFFECT_BREATHE,
+    LED_EFFECT_DOUBLE_BLINK,
 } led_effect_t;
 
 // 动画计时语义：自动模式逐任务计算频率；手动模式使用状态级频率。

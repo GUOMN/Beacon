@@ -501,7 +501,7 @@ class WindowsDashboardApp:
             button.grid(row=row, column=2, padx=(4, 8))
             self._style_buttons[state] = button
             effect_input = ttk.Combobox(
-                themes, textvariable=effect_var, values=("常亮", "闪烁", "呼吸"),
+                themes, textvariable=effect_var, values=("常亮", "闪烁", "呼吸", "双闪"),
                 state="readonly", width=9,
             )
             effect_input.grid(row=row, column=3)
@@ -537,7 +537,7 @@ class WindowsDashboardApp:
                     frequency_text.grid_remove()
                     duty_widget.grid_remove()
                     duty_text.grid_remove()
-                elif effect_name == "呼吸":
+                elif effect_name in ("呼吸", "双闪"):
                     automatic_widget.grid()
                     frequency_widget.grid()
                     frequency_text.grid()
@@ -707,7 +707,7 @@ class WindowsDashboardApp:
             state_styles={
                 state: StateStyle(
                     color=self._calibrate_color(color),
-                    effect={"常亮": 1, "闪烁": 2, "呼吸": 3}[self._style_effects[state].get()],
+                    effect={"常亮": 1, "闪烁": 2, "呼吸": 3, "双闪": 4}[self._style_effects[state].get()],
                     period_ms=max(200, min(10000, round(60000 / max(6, min(300, self._style_frequencies[state].get()))))),
                     blink_duty_percent=max(1, min(100, self._style_duties[state].get())),
                 )
@@ -1519,7 +1519,7 @@ class WindowsDashboardApp:
                 state_styles={
                     state: StateStyle(
                         color=self._calibrate_color(color),
-                        effect={"常亮": 1, "闪烁": 2, "呼吸": 3}[self._style_effects[state].get()],
+                        effect={"常亮": 1, "闪烁": 2, "呼吸": 3, "双闪": 4}[self._style_effects[state].get()],
                         period_ms=max(200, min(10000, round(60000 / max(6, min(300, self._style_frequencies[state].get()))))),
                         blink_duty_percent=max(1, min(100, self._style_duties[state].get())),
                     )

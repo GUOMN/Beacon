@@ -47,6 +47,16 @@ static float effect_scale(const led_status_t *status, uint32_t now_ms)
         return phase_ms < pulse_ms ? 1.0f : 0.0f;
     }
 
+    if (status->effect == LED_EFFECT_DOUBLE_BLINK) {
+        // 两次短闪后保持熄灭，period_ms 表示整组双闪的重复周期。
+        // 短周期会自动压缩脉冲，长周期则保持清晰的 100 ms 短闪。
+        const uint32_t pulse_ms = status->period_ms / 6U < 100U
+                                      ? status->period_ms / 6U : 100U;
+        return (phase_ms < pulse_ms ||
+                (phase_ms >= pulse_ms * 2U && phase_ms < pulse_ms * 3U))
+                   ? 1.0f : 0.0f;
+    }
+
     // 余弦曲线让呼吸的明暗转换更柔和
     const float phase = (2.0f * (float)M_PI * phase_ms) / status->period_ms;
     return 0.5f - 0.5f * cosf(phase);
@@ -162,7 +172,7 @@ esp_err_t led_status_set(uint8_t index, const led_status_t *status)
     ESP_RETURN_ON_FALSE(s_status_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "显示任务未启动");
     ESP_RETURN_ON_FALSE(index < s_active_count && status != NULL,
                         ESP_ERR_INVALID_ARG, TAG, "灯珠编号或状态无效");
-    ESP_RETURN_ON_FALSE(status->effect <= LED_EFFECT_BREATHE,
+    ESP_RETURN_ON_FALSE(status->effect <= LED_EFFECT_DOUBLE_BLINK,
                         ESP_ERR_INVALID_ARG, TAG, "显示效果无效");
     ESP_RETURN_ON_FALSE(status->blink_duty_percent <= 100U,
                         ESP_ERR_INVALID_ARG, TAG, "闪烁占空比无效");

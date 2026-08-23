@@ -7,6 +7,7 @@
 
 static bool s_state_style_valid[PANEL_STATE_ERROR + 1U];
 static led_status_t s_state_styles[PANEL_STATE_ERROR + 1U];
+static led_effect_t s_system_effect = LED_EFFECT_DOUBLE_BLINK;
 
 // 上位机不覆盖动画参数时采用的固件默认值。
 #define DEFAULT_TASK_ANIMATION_PERIOD_MS 1200U
@@ -36,12 +37,19 @@ esp_err_t dashboard_status_load_saved_styles(void)
     }
     ESP_RETURN_ON_ERROR(result, "dashboard", "打开状态主题存储失败");
 
+    uint8_t saved_system_effect = 0U;
+    if (nvs_get_u8(handle, "system_fx", &saved_system_effect) == ESP_OK &&
+        saved_system_effect >= LED_EFFECT_SOLID &&
+        saved_system_effect <= LED_EFFECT_DOUBLE_BLINK) {
+        s_system_effect = (led_effect_t)saved_system_effect;
+    }
+
     for (panel_state_t state = PANEL_STATE_RUNNING; state <= PANEL_STATE_ERROR; ++state) {
         saved_style_t saved;
         size_t size = sizeof(saved);
         if (nvs_get_blob(handle, s_style_keys[state], &saved, &size) == ESP_OK &&
             size == sizeof(saved) && saved.version == SAVED_STYLE_VERSION &&
-            saved.effect >= LED_EFFECT_SOLID && saved.effect <= LED_EFFECT_BREATHE &&
+            saved.effect >= LED_EFFECT_SOLID && saved.effect <= LED_EFFECT_DOUBLE_BLINK &&
             (saved.effect == LED_EFFECT_SOLID ||
              (saved.period_ms >= 200U && saved.period_ms <= 10000U)) &&
             (saved.effect != LED_EFFECT_BLINK ||
@@ -177,7 +185,7 @@ esp_err_t dashboard_status_set_state_style(panel_state_t state,
                                            uint8_t blink_duty_percent)
 {
     ESP_RETURN_ON_FALSE(state > PANEL_STATE_IDLE && state <= PANEL_STATE_ERROR &&
-                            effect >= LED_EFFECT_SOLID && effect <= LED_EFFECT_BREATHE,
+                            effect >= LED_EFFECT_SOLID && effect <= LED_EFFECT_DOUBLE_BLINK,
                         ESP_ERR_INVALID_ARG, "dashboard", "状态主题数据无效");
     if (effect != LED_EFFECT_SOLID) {
         ESP_RETURN_ON_FALSE(period_ms >= 200U && period_ms <= 10000U,
@@ -251,11 +259,29 @@ esp_err_t dashboard_status_set_usage(uint8_t remaining_percent,
         .green = green,
         .blue = 0,
         .brightness = 210,
-        // 系统用量灯使用明确的开关闪烁，与任务灯的柔和呼吸区分。
-        .effect = LED_EFFECT_BLINK,
+        // 系统灯默认短亮两次再停顿，与任务灯的单闪和呼吸明确区分。
+        .effect = s_system_effect,
         .period_ms = period_ms,
     };
     return led_status_set(PANEL_LED_USAGE, &status);
+}
+
+esp_err_t dashboard_status_set_system_effect(led_effect_t effect)
+{
+    ESP_RETURN_ON_FALSE(effect >= LED_EFFECT_SOLID && effect <= LED_EFFECT_DOUBLE_BLINK,
+                        ESP_ERR_INVALID_ARG, "dashboard", "系统灯效无效");
+    nvs_handle_t handle;
+    ESP_RETURN_ON_ERROR(nvs_open("status_panel", NVS_READWRITE, &handle),
+                        "dashboard", "打开系统灯效存储失败");
+    esp_err_t result = nvs_set_u8(handle, "system_fx", (uint8_t)effect);
+    if (result == ESP_OK) {
+        result = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (result == ESP_OK) {
+        s_system_effect = effect;
+    }
+    return result;
 }
 
 esp_err_t dashboard_status_set_snapshot(uint8_t remaining_percent,

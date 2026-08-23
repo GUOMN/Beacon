@@ -20,7 +20,35 @@ fn bridge_script() -> Result<PathBuf, String> {
         .ok_or_else(|| "找不到 Python 后台桥接脚本，请重新安装客户端".to_string())
 }
 
+#[cfg(target_os = "macos")]
+fn bundled_bridge() -> Option<PathBuf> {
+    let name = if cfg!(target_arch = "aarch64") {
+        "bridge-aarch64"
+    } else {
+        "bridge-x86_64"
+    };
+    let executable = std::env::current_exe().ok()?;
+    let path = executable.parent()?.parent()?.join("Resources/binaries").join(name);
+    path.is_file().then_some(path)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bundled_bridge() -> Option<PathBuf> { None }
+
 fn run_bridge(command: &str, payload: &Value) -> Result<Value, String> {
+    if let Some(binary) = bundled_bridge() {
+        let working_dir = binary.parent().ok_or("内置后台路径无效")?.to_path_buf();
+        let mut process = Command::new(&binary);
+        process.arg(command).current_dir(&working_dir)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = process.spawn().map_err(|error| format!("内置后台启动失败：{error}"))?;
+        if let Some(stdin) = child.stdin.as_mut() { stdin.write_all(payload.to_string().as_bytes()).map_err(|e| e.to_string())?; }
+        let output = child.wait_with_output().map_err(|e| e.to_string())?;
+        if output.status.success() {
+            return serde_json::from_slice(&output.stdout).map_err(|error| format!("后台返回了无效数据：{error}"));
+        }
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
     let script = bridge_script()?;
     let working_dir = script.parent().ok_or("后台脚本路径无效")?;
     let interpreters: &[(&str, &[&str])] = if cfg!(windows) {
@@ -56,6 +84,16 @@ struct BridgeProcess {
 struct BridgeState(Arc<Mutex<Option<BridgeProcess>>>);
 
 fn start_bridge_process() -> Result<BridgeProcess, String> {
+    if let Some(binary) = bundled_bridge() {
+        let working_dir = binary.parent().ok_or("内置后台路径无效")?.to_path_buf();
+        let mut command = Command::new(&binary);
+        command.arg("serve").current_dir(&working_dir)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = command.spawn().map_err(|error| format!("内置后台启动失败：{error}"))?;
+        let stdin = child.stdin.take().ok_or("内置后台输入管道创建失败")?;
+        let stdout = child.stdout.take().ok_or("内置后台输出管道创建失败")?;
+        return Ok(BridgeProcess { _child: child, stdin, stdout: BufReader::new(stdout) });
+    }
     let script = bridge_script()?;
     let working_dir = script.parent().ok_or("后台脚本路径无效")?;
     let interpreters: &[(&str, &[&str])] = if cfg!(windows) {

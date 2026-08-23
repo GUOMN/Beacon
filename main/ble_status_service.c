@@ -61,6 +61,7 @@ static void delayed_restart_task(void *arg)
 #define PACKET_TYPE_LED_COUNT     0x08U
 #define PACKET_TYPE_SLEEP_TIMEOUT 0x09U
 #define PACKET_TYPE_CHANNEL_COUNT  0x0AU
+#define PACKET_TYPE_SYSTEM_EFFECT  0x0BU
 #define HEARTBEAT_PACKET_SIZE     4U
 #define SNAPSHOT_PACKET_SIZE      17U
 #define RAW_LED_PACKET_SIZE       12U
@@ -74,6 +75,7 @@ static void delayed_restart_task(void *arg)
 #define LED_COUNT_PACKET_SIZE     5U
 #define SLEEP_TIMEOUT_PACKET_SIZE 6U
 #define CHANNEL_COUNT_PACKET_SIZE 5U
+#define SYSTEM_EFFECT_PACKET_SIZE 5U
 
 static esp_err_t save_sleep_timeout(uint16_t minutes)
 {
@@ -409,6 +411,11 @@ static int control_access(uint16_t conn_handle, uint16_t attr_handle,
             }
         } else {
             result = ESP_ERR_INVALID_ARG;
+        }
+        break;
+    case PACKET_TYPE_SYSTEM_EFFECT:
+        if (packet_len == SYSTEM_EFFECT_PACKET_SIZE) {
+            result = dashboard_status_set_system_effect((led_effect_t)packet[4]);
         }
         break;
     case PACKET_TYPE_PANEL_HEADER:

@@ -39,9 +39,10 @@ esp_err_t dashboard_status_set_with_timing(uint8_t led_index, panel_state_t stat
                                            uint8_t progress, uint16_t period_ms,
                                            led_animation_timing_t timing_mode);
 
-// 第一颗灯：颜色表示剩余百分比，呼吸速度表示短周期已用百分比
+// 第一颗灯：颜色表示剩余百分比，双闪重复速度表示短周期繁忙程度
 esp_err_t dashboard_status_set_usage(uint8_t remaining_percent,
                                      uint8_t period_used_percent);
+esp_err_t dashboard_status_set_system_effect(led_effect_t effect);
 
 // 一次更新第一颗用量灯与后五颗任务灯
 esp_err_t dashboard_status_set_snapshot(uint8_t remaining_percent,

@@ -29,7 +29,7 @@ class BLEProtocol:
         period_ms: int = 1200, blink_duty_percent: int = 15,
     ) -> bytes:
         """覆盖状态的颜色、行为、动画周期，以及闪烁时的亮灯占空比。"""
-        if not 1 <= state <= 5 or not 1 <= effect <= 3:
+        if not 1 <= state <= 5 or not 1 <= effect <= 4:
             raise ValueError("状态或灯效编号无效")
         if len(color) != 3 or any(channel < 0 or channel > 255 for channel in color):
             raise ValueError("RGB 颜色无效")
@@ -78,6 +78,12 @@ class BLEProtocol:
         if channels not in (1, 2):
             raise ValueError("灯带通道数必须是 1 或 2")
         return bytes((0xC3, 1, 10, sequence & 0xFF, channels))
+
+    @classmethod
+    def encode_system_effect(cls, sequence: int, effect: int) -> bytes:
+        if not 1 <= effect <= 4:
+            raise ValueError("系统灯效必须是常亮、闪烁、呼吸或双闪")
+        return bytes((0xC3, 1, 11, sequence & 0xFF, effect))
     SERVICE_UUID = "0100c310-7625-819e-934c-32b8e4177d6a"
     CONTROL_UUID = "0200c310-7625-819e-934c-32b8e4177d6a"
     OTA_UUID = "0300c310-7625-819e-934c-32b8e4177d6a"
