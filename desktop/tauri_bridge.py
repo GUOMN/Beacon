@@ -283,6 +283,7 @@ def main() -> int:
     handlers = {"dashboard": lambda _p: dashboard(), "scan-devices": lambda _p: scan_devices(), "settings": lambda _p: settings(), "save-settings": save_settings, "manage-tasks": manage_tasks, "apply-device": apply_device, "identify": identify, "ota": ota}
     if command == "serve":
         store = StatusEventStore()
+        store.fail_interrupted_tasks()
         event_server = EventIngestServer(store)
         event_server.start()
         codex_source = CodexSessionSource(store, lambda _message: None)

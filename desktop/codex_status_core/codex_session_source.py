@@ -30,16 +30,15 @@ class CodexSessionSource:
 
     def start(self) -> None:
         self._load_titles()
-        now = time.time()
         for path in self._session_files():
-            # 最近会话回读尾部，应用重启后仍可恢复正在执行的任务；旧会话从末尾开始。
+            # Existing Codex history is not an application data source. Start at
+            # EOF and ingest only events produced while this client is running.
             try:
                 stat = path.stat()
             except FileNotFoundError:
                 # Codex 可能在 glob 完成后立刻归档或轮换会话文件。
                 continue
-            self._offsets[path] = 0 if now - stat.st_mtime < 300 else stat.st_size
-        self.poll_once()
+            self._offsets[path] = stat.st_size
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 

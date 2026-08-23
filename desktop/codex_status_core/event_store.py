@@ -224,6 +224,32 @@ class StatusEventStore:
             database.executemany("DELETE FROM task_layout WHERE task_id=?", [(task_id,) for task_id in task_ids])
             database.executemany("DELETE FROM task_usage WHERE task_id=?", [(task_id,) for task_id in task_ids])
 
+    def fail_interrupted_tasks(self) -> None:
+        """Close transient tasks left behind by a previous application run."""
+        now_ms = time.time_ns() // 1_000_000
+        with self._connect() as database:
+            rows = database.execute(
+                """
+                WITH ranked AS (
+                    SELECT task_id,title,source,state,
+                           ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY occurred_at_ms DESC,id DESC) position
+                    FROM task_events
+                )
+                SELECT task_id,title,source FROM ranked
+                WHERE position=1 AND state IN ('running','waiting')
+                """
+            ).fetchall()
+            database.executemany(
+                """
+                INSERT INTO task_events(task_id,title,state,progress,source,event_key,occurred_at_ms)
+                VALUES (?,?, 'failure',0,?,?,?)
+                """,
+                [
+                    (row["task_id"], row["title"], row["source"], f"startup-interrupted:{row['task_id']}:{now_ms}", now_ms)
+                    for row in rows
+                ],
+            )
+
     def update_task_usage(
         self,
         task_id: str,
