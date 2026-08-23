@@ -71,6 +71,7 @@ class BLEProtocol:
     SERVICE_UUID = "0100c310-7625-819e-934c-32b8e4177d6a"
     CONTROL_UUID = "0200c310-7625-819e-934c-32b8e4177d6a"
     OTA_UUID = "0300c310-7625-819e-934c-32b8e4177d6a"
+    INFO_UUID = "0400c310-7625-819e-934c-32b8e4177d6a"
 
     @staticmethod
     def encode_ota_start(size: int) -> bytes:

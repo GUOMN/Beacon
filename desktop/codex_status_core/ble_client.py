@@ -25,6 +25,9 @@ class DashboardBLEClient:
         self._sequence = 0
         self._connected_client: BleakClient | None = None
         self._device_id = device_id.upper() if device_id else None
+        self._firmware_info = ""
+        self._ota_previous_info = ""
+        self._ota_waiting_verification = False
 
     async def run(self) -> None:
         self._stop_event.clear()
@@ -81,6 +84,19 @@ class DashboardBLEClient:
         async with BleakClient(device, disconnected_callback=on_disconnect) as client:
             self._connected_client = client
             self._status_callback("蓝牙已连接")
+            try:
+                raw_info = await client.read_gatt_char(BLEProtocol.INFO_UUID)
+                new_info = bytes(raw_info).decode("utf-8", errors="replace")
+                self._firmware_info = new_info
+                self._status_callback(f"固件信息：{new_info}")
+                if self._ota_waiting_verification:
+                    if new_info != self._ota_previous_info:
+                        self._status_callback(f"蓝牙升级验证成功：{new_info}")
+                    else:
+                        self._status_callback("蓝牙升级后版本未变化，请检查所选固件")
+                    self._ota_waiting_verification = False
+            except Exception:
+                self._status_callback("当前灯板固件暂不支持版本读取")
             writer = asyncio.create_task(self._writer_loop(client))
             heartbeat = asyncio.create_task(self._heartbeat_loop(client))
             ota_writer = asyncio.create_task(self._ota_loop(client))
@@ -148,6 +164,7 @@ class DashboardBLEClient:
         while True:
             firmware = await self._ota_outgoing.get()
             async with self._write_lock:
+                self._ota_previous_info = self._firmware_info
                 characteristic = client.services.get_characteristic(BLEProtocol.OTA_UUID)
                 if characteristic is None:
                     raise RuntimeError("灯板固件不支持蓝牙 OTA")
@@ -173,6 +190,7 @@ class DashboardBLEClient:
                         BLEProtocol.OTA_UUID, BLEProtocol.encode_ota_finish(), response=True
                     )
                     self._status_callback("固件校验通过，灯板正在重启")
+                    self._ota_waiting_verification = True
                 except Exception:
                     with suppress(Exception):
                         await client.write_gatt_char(

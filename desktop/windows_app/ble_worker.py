@@ -18,6 +18,7 @@ class BLEWorker:
         self._status_callback = status_callback
         self._device_id = device_id
         self._connected = threading.Event()
+        self._firmware_info = "读取中"
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client: DashboardBLEClient | None = None
         self._thread = threading.Thread(target=self._thread_main, daemon=True)
@@ -54,11 +55,17 @@ class BLEWorker:
         """供界面只读查询当前蓝牙连接状态。"""
         return self._connected.is_set()
 
+    @property
+    def firmware_info(self) -> str:
+        return self._firmware_info
+
     def _handle_status(self, message: str) -> None:
         if message == "蓝牙已连接":
             self._connected.set()
         elif message == "蓝牙已断开":
             self._connected.clear()
+        elif message.startswith("固件信息："):
+            self._firmware_info = message.removeprefix("固件信息：")
         self._status_callback(message)
 
     def _thread_main(self) -> None:

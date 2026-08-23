@@ -1,10 +1,12 @@
 #include "ble_status_service.h"
 
 #include <string.h>
+#include <stdio.h>
 
 #include "app_config.h"
 #include "dashboard_status.h"
 #include "esp_check.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_system.h"
@@ -138,6 +140,28 @@ static const ble_uuid128_t STATUS_CONTROL_UUID = BLE_UUID128_INIT(
 static const ble_uuid128_t STATUS_OTA_UUID = BLE_UUID128_INIT(
     0x6a, 0x7d, 0x17, 0xe4, 0xb8, 0x32, 0x4c, 0x93,
     0x9e, 0x81, 0x25, 0x76, 0x10, 0xc3, 0x00, 0x03);
+static const ble_uuid128_t STATUS_INFO_UUID = BLE_UUID128_INIT(
+    0x6a, 0x7d, 0x17, 0xe4, 0xb8, 0x32, 0x4c, 0x93,
+    0x9e, 0x81, 0x25, 0x76, 0x10, 0xc3, 0x00, 0x04);
+
+static int firmware_info_access(uint16_t conn_handle, uint16_t attr_handle,
+                                struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) {
+        return BLE_ATT_ERR_READ_NOT_PERMITTED;
+    }
+    const esp_app_desc_t *description = esp_app_get_description();
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    char info[80];
+    const int length = snprintf(info, sizeof(info), "%s|%s|%s %s",
+                                description->version,
+                                running != NULL ? running->label : "unknown",
+                                description->date, description->time);
+    return os_mbuf_append(ctxt->om, info, (uint16_t)length) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
 
 enum {
     OTA_COMMAND_START = 0x01,
@@ -392,6 +416,11 @@ static const struct ble_gatt_svc_def s_services[] = {
                 .uuid = &STATUS_OTA_UUID.u,
                 .access_cb = ota_access,
                 .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+            },
+            {
+                .uuid = &STATUS_INFO_UUID.u,
+                .access_cb = firmware_info_access,
+                .flags = BLE_GATT_CHR_F_READ,
             },
             {0},
         },

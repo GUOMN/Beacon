@@ -735,7 +735,7 @@ class WindowsDashboardApp:
 
         tree = ttk.Treeview(
             outer,
-            columns=("name", "device_id", "rssi", "binding"),
+            columns=("name", "device_id", "rssi", "firmware", "binding"),
             show="headings",
             selectmode="browse",
             height=8,
@@ -743,10 +743,12 @@ class WindowsDashboardApp:
         tree.heading("name", text="设备名称")
         tree.heading("device_id", text="唯一 ID")
         tree.heading("rssi", text="信号强度")
+        tree.heading("firmware", text="固件版本 / OTA 槽")
         tree.heading("binding", text="绑定状态")
-        tree.column("name", width=260)
+        tree.column("name", width=210)
         tree.column("device_id", width=130, anchor=tk.CENTER)
         tree.column("rssi", width=90, anchor=tk.CENTER)
+        tree.column("firmware", width=210, anchor=tk.CENTER)
         tree.column("binding", width=90, anchor=tk.CENTER)
         tree.pack(fill=tk.BOTH, expand=True)
         self._device_tree = tree
@@ -764,7 +766,11 @@ class WindowsDashboardApp:
             }
             tree.insert(
                 "", tk.END, iid="bound_device",
-                values=(display_name, self._bound_device_id, "--", "已连接" if connected else "连接中"),
+                values=(
+                    display_name, self._bound_device_id, "--",
+                    self._worker.firmware_info if connected and self._worker else "--",
+                    "已连接" if connected else "连接中",
+                ),
             )
 
         def selected_device() -> dict[str, object] | None:
@@ -1625,6 +1631,7 @@ class WindowsDashboardApp:
                                 device["name"],
                                 device["device_id"],
                                 f'{device["rssi"]} dBm',
+                                self._worker.firmware_info if is_bound and self._worker else "--",
                                 "已绑定" if is_bound else "未绑定",
                             ),
                         )
@@ -1642,6 +1649,7 @@ class WindowsDashboardApp:
                             "", 0, iid="bound_device",
                             values=(
                                 placeholder["name"], self._bound_device_id, "--",
+                                self._worker.firmware_info if connected and self._worker else "--",
                                 "已连接" if connected else "离线",
                             ),
                         )
@@ -1675,13 +1683,23 @@ class WindowsDashboardApp:
                 if message == "蓝牙已连接":
                     tree.item(
                         "bound_device",
-                        values=("已绑定灯板（已连接）", self._bound_device_id, "--", "已连接"),
+                        values=(
+                            "已绑定灯板（已连接）", self._bound_device_id, "--",
+                            self._worker.firmware_info if self._worker else "读取中", "已连接",
+                        ),
                     )
                 elif message == "蓝牙已断开":
                     tree.item(
                         "bound_device",
-                        values=("已绑定灯板（当前离线）", self._bound_device_id, "--", "离线"),
+                        values=(
+                            "已绑定灯板（当前离线）", self._bound_device_id, "--",
+                            self._worker.firmware_info if self._worker else "--", "离线",
+                        ),
                     )
+                elif message.startswith("固件信息："):
+                    current = tree.item("bound_device", "values")
+                    if current:
+                        tree.item("bound_device", values=(*current[:3], message.removeprefix("固件信息："), current[4]))
             if self._should_log_message(message):
                 timestamp = datetime.now().strftime("%H:%M:%S")
                 self._log.configure(state=tk.NORMAL)
