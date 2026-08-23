@@ -32,10 +32,8 @@ jobs:
           python -m pip install -r desktop/requirements.txt pyinstaller
           pyinstaller --clean --noconfirm --onefile \
             --name bridge-${{ matrix.arch }} \
-            --paths desktop --collect-all bleak --collect-all psutil \
+            --paths desktop --collect-all psutil \
             --collect-submodules codex_status_core \
-            --hidden-import windows_app.ble_worker \
-            --hidden-import CoreBluetooth \
             desktop/tauri_bridge.py
       - uses: actions/upload-artifact@v4
         with:

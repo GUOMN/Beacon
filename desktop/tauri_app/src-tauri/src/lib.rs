@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::{io::{BufRead, BufReader, Write}, path::PathBuf, process::{Child, ChildStdin, ChildStdout, Command, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU8, Ordering}}};
+use std::{io::{BufRead, BufReader, Write}, path::PathBuf, process::{Child, ChildStdin, ChildStdout, Command, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering}}};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use btleplug::api::{Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType};
 use btleplug::platform::{Manager as BleManager, Peripheral as BlePeripheral};
@@ -60,6 +60,7 @@ struct NativeBleState {
     sequence: Arc<AtomicU8>,
     connected_device_id: Arc<AsyncMutex<Option<String>>>,
     manual_disconnect: Arc<AtomicBool>,
+    foreground_operations: Arc<AtomicUsize>,
 }
 
 impl NativeBleState {
@@ -76,8 +77,22 @@ impl NativeBleState {
             sequence: Arc::new(AtomicU8::new(0)),
             connected_device_id: Arc::new(AsyncMutex::new(None)),
             manual_disconnect: Arc::new(AtomicBool::new(false)),
+            foreground_operations: Arc::new(AtomicUsize::new(0)),
         }
     }
+}
+
+struct ForegroundGuard(Arc<AtomicUsize>);
+
+impl ForegroundGuard {
+    fn new(state: &NativeBleState) -> Self {
+        state.foreground_operations.fetch_add(1, Ordering::SeqCst);
+        Self(state.foreground_operations.clone())
+    }
+}
+
+impl Drop for ForegroundGuard {
+    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); }
 }
 
 const DEVICE_PREFIX: &str = "Codex-Light-";
@@ -187,7 +202,8 @@ async fn get_dashboard(
 ) -> Result<Value, String> {
     let result = run_bridge_async(bridge.inner().clone(), "dashboard", serde_json::json!({})).await?;
     let signature = serde_json::to_string(&result).map_err(|error| error.to_string())?;
-    let should_push = !ble.manual_disconnect.load(Ordering::SeqCst) && !*ble.preview_active.lock().await && {
+    let should_push = ble.foreground_operations.load(Ordering::SeqCst) == 0
+        && !ble.manual_disconnect.load(Ordering::SeqCst) && !*ble.preview_active.lock().await && {
         let mut previous = ble.last_dashboard.lock().await;
         if previous.as_ref() == Some(&signature) { false } else {
             *previous = Some(signature);
@@ -201,7 +217,7 @@ async fn get_dashboard(
         let bridge_state = bridge.inner().clone();
         let ble_state = ble.inner().clone();
         tauri::async_runtime::spawn(async move {
-            if native_apply(bridge_state, ble_state.clone(), serde_json::json!({})).await.is_err() {
+            if native_apply(bridge_state, ble_state.clone(), serde_json::json!({}), false).await.is_err() {
                 *ble_state.last_dashboard.lock().await = None;
             }
         });
@@ -211,6 +227,8 @@ async fn get_dashboard(
 
 #[tauri::command]
 async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, String> {
+    let _foreground = ForegroundGuard::new(ble.inner());
+    let _connection = ble.write_lock.lock().await;
     // The Tauri process owns Bluetooth on both platforms. On macOS this makes
     // the permission request belong to the signed Beacon app instead of a
     // transient Python helper, so scanning cannot finish before authorization.
@@ -241,7 +259,8 @@ async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, St
     // Keep the first scan alive while macOS presents and records the one-time
     // Bluetooth permission sheet. The same signed app process continues the
     // scan after approval instead of returning an early empty result.
-    tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+    let scan_seconds = if cfg!(target_os = "macos") { 12 } else { 4 };
+    tokio::time::sleep(std::time::Duration::from_secs(scan_seconds)).await;
 
     let mut devices: Vec<Value> = Vec::new();
     for adapter in &adapters {
@@ -278,25 +297,32 @@ async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, St
 
 #[tauri::command]
 async fn identify_device(state: tauri::State<'_, NativeBleState>, address: String) -> Result<Value, String> {
-    let peripheral = {
+    let _foreground = ForegroundGuard::new(state.inner());
+    let _connection = state.write_lock.lock().await;
+    let (peripheral, reused_connection) = {
         let held = state.peripheral.lock().await;
         match held.as_ref() {
-            Some(item) if item.is_connected().await.unwrap_or(false) => item.clone(),
-            _ => connect_peripheral(Some(&address), None).await?,
+            Some(item) if item.is_connected().await.unwrap_or(false) => (item.clone(), true),
+            _ => (connect_peripheral(Some(&address), None).await?, false),
         }
     };
     let control = characteristic(&peripheral, CONTROL_UUID)?;
-    let _guard = state.write_lock.lock().await;
     peripheral.write(&control, &[0xC3, 1, 4, 0], WriteType::WithResponse).await
         .map_err(|error| format!("发送识别动画失败：{error}"))?;
-    *state.peripheral.lock().await = Some(peripheral);
-    start_heartbeat(state.inner().clone());
+    if reused_connection {
+        *state.peripheral.lock().await = Some(peripheral);
+        start_heartbeat(state.inner().clone());
+    } else {
+        peripheral.disconnect().await.map_err(|error| format!("识别完成但断开失败：{error}"))?;
+    }
     Ok(serde_json::json!({"ok": true}))
 }
 
 #[tauri::command]
 async fn disconnect_device(state: tauri::State<'_, NativeBleState>) -> Result<Value, String> {
+    let _foreground = ForegroundGuard::new(state.inner());
     state.manual_disconnect.store(true, Ordering::SeqCst);
+    let _guard = state.write_lock.lock().await;
     let peripheral = state.peripheral.lock().await.take();
     if let Some(peripheral) = peripheral {
         if peripheral.is_connected().await.unwrap_or(false) {
@@ -309,11 +335,27 @@ async fn disconnect_device(state: tauri::State<'_, NativeBleState>) -> Result<Va
 }
 
 #[tauri::command]
+async fn connection_status(state: tauri::State<'_, NativeBleState>) -> Result<Value, String> {
+    let peripheral = state.peripheral.lock().await.clone();
+    let connected = match peripheral {
+        Some(item) => item.is_connected().await.unwrap_or(false),
+        None => false,
+    };
+    Ok(serde_json::json!({
+        "connected": connected,
+        "device_id": state.connected_device_id.lock().await.clone(),
+        "manually_disconnected": state.manual_disconnect.load(Ordering::SeqCst),
+    }))
+}
+
+#[tauri::command]
 async fn ota_start(
     state: tauri::State<'_, NativeBleState>,
     address: String,
     firmware_base64: String,
 ) -> Result<Value, String> {
+    let foreground = ForegroundGuard::new(state.inner());
+    let connection = state.write_lock.clone().lock_owned().await;
     let firmware = BASE64.decode(firmware_base64).map_err(|_| "固件文件格式无效".to_string())?;
     if firmware.is_empty() || firmware.len() > 2 * 1024 * 1024 {
         return Err("固件大小无效".into());
@@ -330,9 +372,9 @@ async fn ota_start(
     *state.ota_progress.lock().await = serde_json::json!({"state":"running","progress":0,"message":"正在写入固件"});
     let progress = state.ota_progress.clone();
     let held = state.peripheral.clone();
-    let write_lock = state.write_lock.clone();
     tauri::async_runtime::spawn(async move {
-        let _guard = write_lock.lock().await;
+        let _foreground = foreground;
+        let _connection = connection;
         let result: Result<(), String> = async {
             let size = firmware.len() as u32;
             let start = [1, size as u8, (size >> 8) as u8, (size >> 16) as u8, (size >> 24) as u8];
@@ -368,16 +410,40 @@ async fn ota_progress(state: tauri::State<'_, NativeBleState>) -> Result<Value, 
     Ok(state.ota_progress.lock().await.clone())
 }
 
-async fn native_apply(bridge: BridgeState, ble: NativeBleState, mut payload: Value) -> Result<Value, String> {
-    ble.manual_disconnect.store(false, Ordering::SeqCst);
+async fn native_apply(bridge: BridgeState, ble: NativeBleState, mut payload: Value, explicit: bool) -> Result<Value, String> {
+    let _foreground = explicit.then(|| ForegroundGuard::new(&ble));
+    if explicit {
+        ble.manual_disconnect.store(false, Ordering::SeqCst);
+    } else if ble.manual_disconnect.load(Ordering::SeqCst) || ble.foreground_operations.load(Ordering::SeqCst) > 0 {
+        return Err("设备已被主动断开".into());
+    }
     if let Some(preview) = payload.get("preview").and_then(Value::as_bool) {
         *ble.preview_active.lock().await = preview;
     }
+    // A manual save owns the connection for the whole prepare/write transaction.
+    // A background refresh prepares without the lock, then yields if any foreground
+    // operation arrived while it was working or waiting for the connection.
+    let explicit_connection = if explicit {
+        Some(ble.write_lock.clone().lock_owned().await)
+    } else {
+        None
+    };
     payload["_native_transport"] = Value::Bool(true);
     let prepared = tauri::async_runtime::spawn_blocking(move || run_persistent_bridge(&bridge, "apply-device", &payload))
         .await.map_err(|error| format!("后台任务异常：{error}"))??;
     let device_id = prepared.get("device_id").and_then(Value::as_str).ok_or("没有已绑定灯板")?;
     let packets = prepared.get("packets").and_then(Value::as_array).ok_or("配置数据生成失败")?;
+    if !explicit && (ble.manual_disconnect.load(Ordering::SeqCst) || ble.foreground_operations.load(Ordering::SeqCst) > 0) {
+        return Err("设备已被主动断开".into());
+    }
+    let background_connection = if explicit {
+        None
+    } else {
+        Some(ble.write_lock.clone().lock_owned().await)
+    };
+    if !explicit && (ble.manual_disconnect.load(Ordering::SeqCst) || ble.foreground_operations.load(Ordering::SeqCst) > 0) {
+        return Err("前台正在使用蓝牙连接".into());
+    }
     let peripheral = {
         let held = ble.peripheral.lock().await;
         match held.as_ref() {
@@ -386,11 +452,13 @@ async fn native_apply(bridge: BridgeState, ble: NativeBleState, mut payload: Val
         }
     };
     let control = characteristic(&peripheral, CONTROL_UUID)?;
-    let _guard = ble.write_lock.lock().await;
-    for encoded in packets {
-        let bytes = BASE64.decode(encoded.as_str().ok_or("配置数据格式无效")?)
-            .map_err(|_| "配置数据格式无效".to_string())?;
-        peripheral.write(&control, &bytes, WriteType::WithResponse).await
+    let _connection = (explicit_connection, background_connection);
+    let decoded = packets.iter().map(|encoded| {
+        let value = encoded.as_str().ok_or("配置数据格式无效")?;
+        BASE64.decode(value).map_err(|_| "配置数据格式无效".to_string())
+    }).collect::<Result<Vec<_>, _>>()?;
+    for bytes in &decoded {
+        peripheral.write(&control, bytes, WriteType::WithResponse).await
             .map_err(|error| format!("配置下发失败：{error}"))?;
     }
     *ble.peripheral.lock().await = Some(peripheral);
@@ -404,6 +472,7 @@ fn start_heartbeat(ble: NativeBleState) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if ble.foreground_operations.load(Ordering::SeqCst) > 0 { continue; }
             let peripheral = ble.peripheral.lock().await.clone();
             let Some(peripheral) = peripheral else { break };
             if !peripheral.is_connected().await.unwrap_or(false) {
@@ -414,6 +483,7 @@ fn start_heartbeat(ble: NativeBleState) {
             let Ok(control) = characteristic(&peripheral, CONTROL_UUID) else { break };
             let sequence = ble.sequence.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
             let _guard = ble.write_lock.lock().await;
+            if ble.foreground_operations.load(Ordering::SeqCst) > 0 { continue; }
             if peripheral.write(&control, &[0xC3, 1, 1, sequence], WriteType::WithoutResponse).await.is_err() {
                 *ble.peripheral.lock().await = None;
                 *ble.last_dashboard.lock().await = None;
@@ -432,7 +502,7 @@ async fn bridge_action(
     payload: Value,
 ) -> Result<Value, String> {
     if action == "apply-device" {
-        return native_apply(bridge.inner().clone(), ble.inner().clone(), payload).await;
+        return native_apply(bridge.inner().clone(), ble.inner().clone(), payload, true).await;
     }
     let bridge_state = bridge.inner().clone();
     tauri::async_runtime::spawn_blocking(move || run_persistent_bridge(&bridge_state, &action, &payload))
@@ -485,7 +555,7 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![get_dashboard, scan_devices, identify_device, disconnect_device, ota_start, ota_progress, bridge_action])
+        .invoke_handler(tauri::generate_handler![get_dashboard, scan_devices, identify_device, disconnect_device, connection_status, ota_start, ota_progress, bridge_action])
         .run(tauri::generate_context!())
         .expect("error while running Beacon");
 }

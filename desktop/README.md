@@ -9,9 +9,11 @@ metrics, and task-to-light state calculation.
 - `tauri_app/`: shared React UI, Tauri shell, tray, packaging, and native device transport.
 - `tauri_bridge.py`: JSON boundary between the native shell and Python business core.
 - `codex_status_core/`: SQLite event store, task models, protocol encoding, and Hook ingestion.
-- `windows_app/ble_worker.py`: temporary BLE compatibility adapter retained until the native
-  Tauri device service fully replaces it on both platforms.
 - `tests/`: protocol and event-pipeline tests.
+
+Bluetooth permission, scanning, persistent connection, reconnect, GATT writes,
+identification, and OTA are owned by the shared Tauri/Rust process on both
+Windows and macOS. The Python service never opens a Bluetooth connection.
 
 The legacy Tk UI, Python macOS wrapper, Python tray, old PyInstaller/IExpress
 packages, and the optional Reporter Skill have been removed. Task capture uses
