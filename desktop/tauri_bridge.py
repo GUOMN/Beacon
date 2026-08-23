@@ -289,6 +289,12 @@ def ota_progress() -> dict[str, object]:
 
 
 def main() -> int:
+    if len(sys.argv) >= 4 and sys.argv[1] == "--status-bridge-hook":
+        from codex_status_core.hook_adapter import report_hook
+        return report_hook(sys.argv[2], sys.argv[3])
+    if len(sys.argv) >= 3 and sys.argv[1] == "--status-bridge-codex-notify":
+        from codex_status_core.hook_adapter import report_codex_notification
+        return report_codex_notification(sys.argv[2])
     command = sys.argv[1] if len(sys.argv) > 1 else "dashboard"
     handlers = {"dashboard": lambda _p: dashboard(), "scan-devices": lambda _p: scan_devices(), "settings": lambda _p: settings(), "save-settings": save_settings, "manage-tasks": manage_tasks, "apply-device": apply_device, "identify": identify, "ota": ota, "ota-progress": lambda _p: ota_progress()}
     if command == "serve":

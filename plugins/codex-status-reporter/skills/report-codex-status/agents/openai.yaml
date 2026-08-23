@@ -1,4 +1,0 @@
-interface:
-  display_name: "Report Codex Status"
-  short_description: "Non-blocking task lifecycle reporting"
-  default_prompt: "Report this task lifecycle to the local status bridge without blocking the task."

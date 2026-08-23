@@ -35,45 +35,6 @@ fn bundled_bridge() -> Option<PathBuf> {
 #[cfg(not(target_os = "macos"))]
 fn bundled_bridge() -> Option<PathBuf> { None }
 
-fn run_bridge(command: &str, payload: &Value) -> Result<Value, String> {
-    if let Some(binary) = bundled_bridge() {
-        let working_dir = binary.parent().ok_or("内置后台路径无效")?.to_path_buf();
-        let mut process = Command::new(&binary);
-        process.arg(command).current_dir(&working_dir)
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = process.spawn().map_err(|error| format!("内置后台启动失败：{error}"))?;
-        if let Some(stdin) = child.stdin.as_mut() { stdin.write_all(payload.to_string().as_bytes()).map_err(|e| e.to_string())?; }
-        let output = child.wait_with_output().map_err(|e| e.to_string())?;
-        if output.status.success() {
-            return serde_json::from_slice(&output.stdout).map_err(|error| format!("后台返回了无效数据：{error}"));
-        }
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    let script = bridge_script()?;
-    let working_dir = script.parent().ok_or("后台脚本路径无效")?;
-    let interpreters: &[(&str, &[&str])] = if cfg!(windows) {
-        &[("pythonw", &[]), ("py", &["-3"]), ("python", &[])]
-    } else { &[("python3", &[]), ("python", &[])] };
-    for (program, prefix) in interpreters {
-        let mut process = Command::new(program);
-        process.args(*prefix).arg(&script).arg(command)
-            .current_dir(working_dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        #[cfg(windows)]
-        process.creation_flags(CREATE_NO_WINDOW);
-        let child = process.spawn();
-        let Ok(mut child) = child else { continue };
-        if let Some(stdin) = child.stdin.as_mut() { stdin.write_all(payload.to_string().as_bytes()).map_err(|e| e.to_string())?; }
-        let output = child.wait_with_output().map_err(|e| e.to_string())?;
-        if output.status.success() {
-            return serde_json::from_slice(&output.stdout)
-                .map_err(|error| format!("后台返回了无效数据：{error}"));
-        }
-        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if message.is_empty() { "Python 后台执行失败".into() } else { message });
-    }
-    Err("未找到 Python 3，请先安装桌面端依赖".into())
-}
-
 struct BridgeProcess {
     _child: Child,
     stdin: ChildStdin,

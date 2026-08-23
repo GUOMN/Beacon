@@ -6,16 +6,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codex_status_core.event_store import StatusEventStore
-from codex_status_core.event_data_source import weighted_busy_percent
 from codex_status_core.codex_session_source import CodexSessionSource
 from codex_status_core.hook_manager import HookProvider, install, status, uninstall
 
 
 class EventPipelineTests(unittest.TestCase):
-    def test_weighted_busy_formula(self) -> None:
-        self.assertEqual(weighted_busy_percent(100, 100, 100, 100, 100, 100), 100)
-        self.assertEqual(weighted_busy_percent(100, 0, 0, 0, 0, 0, (1, 0, 0, 0, 0, 0)), 100)
-
     def test_sqlite_snapshot_uses_latest_task_state(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             store = StatusEventStore(Path(folder) / "events.sqlite")

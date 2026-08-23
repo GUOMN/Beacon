@@ -40,7 +40,7 @@ def _command(provider: HookProvider, event_name: str) -> str:
     executable = Path(sys.executable).resolve()
     if getattr(sys, "frozen", False):
         return f'"{executable}" {MARKER} "{provider.key}" "{event_name}"'
-    main_file = Path(__file__).resolve().parents[1] / "windows_app" / "main.py"
+    main_file = Path(__file__).resolve().parents[1] / "tauri_bridge.py"
     return f'"{executable}" "{main_file}" {MARKER} "{provider.key}" "{event_name}"'
 
 
