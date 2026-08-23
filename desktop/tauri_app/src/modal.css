@@ -18,3 +18,14 @@
 .modal-actions .primary { border-color: #25282d; background: #25282d; color: #fff; }
 .modal-actions .danger { border-color: #f0d3d5; color: #b44f58; background: #fff7f7; }
 button:disabled { cursor: not-allowed; opacity: .48; }
+.source-modal { width: min(620px, calc(100vw - 56px)); max-height: calc(100vh - 70px); overflow: hidden; border: 1px solid #e4e6e9; border-radius: 16px; background: #fff; box-shadow: 0 22px 70px #11182730; }
+.source-list { margin: 0 24px; overflow: auto; border: 1px solid #e7e9ec; border-radius: 11px; }
+.source-manager-row { display: grid; grid-template-columns: 36px minmax(170px, 1fr) minmax(150px, 1.2fr) 72px; gap: 10px; align-items: center; padding: 13px 14px; border-top: 1px solid #eceef1; }
+.source-manager-row:first-child { border-top: 0; }
+.source-manager-row strong, .source-manager-row small { display: block; }
+.source-manager-row strong { font-size: 12px; }
+.source-manager-row small { margin-top: 4px; color: #92969d; font-size: 10px; }
+.source-manager-note { color: #777c84; font-size: 10px; line-height: 1.45; }
+.source-switch { min-width: 66px; padding: 7px 9px; font-size: 10px; }
+.source-switch.enabled { border-color: #d8e9e3; background: #eff8f5; color: #3f806b; }
+.source-error { min-height: 18px; margin: 10px 24px 0; color: #b44f58; font-size: 11px; }

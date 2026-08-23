@@ -60,7 +60,22 @@ fn bundled_bridge() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn bundled_bridge() -> Option<PathBuf> {
+    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries/bridge-x86_64.exe");
+    let executable = std::env::current_exe().ok()?;
+    let directory = executable.parent()?;
+    [
+        development,
+        directory.join("binaries/bridge-x86_64.exe"),
+        directory.join("resources/binaries/bridge-x86_64.exe"),
+        directory.join("bridge-x86_64.exe"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 fn bundled_bridge() -> Option<PathBuf> {
     None
 }

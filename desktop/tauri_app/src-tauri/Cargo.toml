@@ -1,6 +1,6 @@
 [package]
 name = "codex-status-bridge"
-version = "0.1.0"
+version = "1.0.0"
 description = "Beacon desktop status light"
 authors = ["Beacon"]
 edition = "2021"

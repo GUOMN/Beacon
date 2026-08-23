@@ -8,6 +8,7 @@ from unittest.mock import patch
 from codex_status_core.event_store import StatusEventStore
 from codex_status_core.codex_session_source import CodexSessionSource
 from codex_status_core.hook_manager import HookProvider, install, status, uninstall
+from tauri_bridge import data_sources, set_data_source
 
 
 class EventPipelineTests(unittest.TestCase):
@@ -73,6 +74,18 @@ class EventPipelineTests(unittest.TestCase):
             restored = path.read_text(encoding="utf-8")
             self.assertIn("existing-notifier.exe", restored)
             self.assertIn("[features]", restored)
+
+    def test_data_source_management_reports_and_changes_real_hook_state(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            provider = HookProvider(
+                "claude", "Claude Code", Path(folder) / "settings.json", (("Stop", "success"),)
+            )
+            with patch("tauri_bridge.hook_providers", return_value=(provider,)):
+                self.assertFalse(data_sources()["sources"][0]["enabled"])
+                enabled = set_data_source({"key": "claude", "enabled": True})
+                self.assertTrue(enabled["sources"][0]["enabled"])
+                disabled = set_data_source({"key": "claude", "enabled": False})
+                self.assertFalse(disabled["sources"][0]["enabled"])
 
     def test_active_sort_pin_and_delete_drive_lamp_snapshot(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:

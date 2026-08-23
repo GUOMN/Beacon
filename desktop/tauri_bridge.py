@@ -14,6 +14,10 @@ from codex_status_core.event_store import StatusEventStore
 from codex_status_core.event_store import app_data_directory
 from codex_status_core.event_store import EventIngestServer
 from codex_status_core.codex_session_source import CodexSessionSource
+from codex_status_core.hook_manager import install as install_hook
+from codex_status_core.hook_manager import providers as hook_providers
+from codex_status_core.hook_manager import status as hook_status
+from codex_status_core.hook_manager import uninstall as uninstall_hook
 from codex_status_core.models import DashboardSnapshot, StateStyle, TaskSlot, TaskState
 
 DEFAULT_STYLES = {
@@ -129,6 +133,46 @@ def manage_tasks(payload: dict[str, object]) -> dict[str, object]:
     return {"ok": True}
 
 
+def data_sources(_payload: dict[str, object] | None = None) -> dict[str, object]:
+    """Return real hook state instead of the desktop UI's former placeholders."""
+    result: list[dict[str, object]] = []
+    for provider in hook_providers():
+        if provider.key == "codex":
+            result.append({
+                "key": provider.key,
+                "name": provider.name,
+                "status": "正在运行",
+                "enabled": True,
+                "manageable": False,
+                "note": "内置实时会话采集，随 Beacon 自动启动",
+            })
+            continue
+        current = hook_status(provider)
+        result.append({
+            "key": provider.key,
+            "name": provider.name,
+            "status": current,
+            "enabled": current == "已启用",
+            "manageable": provider.supported,
+            "note": provider.note or "通过官方 Hook 将任务状态写入本机 Beacon",
+        })
+    return {"sources": result}
+
+
+def set_data_source(payload: dict[str, object]) -> dict[str, object]:
+    key = str(payload.get("key") or "")
+    selected = next((provider for provider in hook_providers() if provider.key == key), None)
+    if selected is None:
+        raise ValueError("未知的数据源")
+    if selected.key == "codex":
+        raise ValueError("Codex 是 Beacon 内置数据源，始终随客户端运行")
+    if bool(payload.get("enabled")):
+        install_hook(selected)
+    else:
+        uninstall_hook(selected)
+    return data_sources()
+
+
 def apply_device(payload: dict[str, object]) -> dict[str, object]:
     global _preview_payload
     if payload.get("preview") is True:
@@ -211,7 +255,15 @@ def main() -> int:
         from codex_status_core.hook_adapter import report_codex_notification
         return report_codex_notification(sys.argv[2])
     command = sys.argv[1] if len(sys.argv) > 1 else "dashboard"
-    handlers = {"dashboard": lambda _p: dashboard(), "settings": lambda _p: settings(), "save-settings": save_settings, "manage-tasks": manage_tasks, "apply-device": apply_device}
+    handlers = {
+        "dashboard": lambda _p: dashboard(),
+        "settings": lambda _p: settings(),
+        "save-settings": save_settings,
+        "manage-tasks": manage_tasks,
+        "data-sources": data_sources,
+        "set-data-source": set_data_source,
+        "apply-device": apply_device,
+    }
     if command == "serve":
         store = StatusEventStore()
         store.fail_interrupted_tasks()
