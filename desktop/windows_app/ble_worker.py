@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 from collections.abc import Callable
 
@@ -82,7 +83,26 @@ def scan_status_devices(result_callback: Callable[[list[dict[str, object]]], Non
     """在独立线程扫描所有状态灯板，避免阻塞 Tk 主线程。"""
     async def scan() -> None:
         status_callback("正在扫描附近灯板")
-        discovered = await BleakScanner.discover(timeout=5, return_adv=True)
+        # macOS 首次使用蓝牙时会在 discover 过程中弹权限确认。CoreBluetooth
+        # 会立即中断这一轮扫描，即使用户随后点了允许，因此授权后自动重试。
+        attempts = 3 if sys.platform == "darwin" else 1
+        discovered = {}
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                discovered = await BleakScanner.discover(timeout=5, return_adv=True)
+                last_error = None
+                if discovered or sys.platform != "darwin":
+                    break
+            except Exception as exc:
+                last_error = exc
+                if sys.platform != "darwin" or attempt == attempts - 1:
+                    raise
+            if attempt < attempts - 1:
+                status_callback("蓝牙权限已请求，正在自动重试扫描")
+                await asyncio.sleep(2.5)
+        if last_error is not None:
+            raise last_error
         devices: list[dict[str, object]] = []
         for device, advertisement in discovered.values():
             name = advertisement.local_name or device.name

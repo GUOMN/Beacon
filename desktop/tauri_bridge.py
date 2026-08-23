@@ -109,7 +109,7 @@ def scan_devices() -> dict[str, object]:
         done.set()
 
     scan_status_devices(receive, lambda _message: None)
-    if not done.wait(8):
+    if not done.wait(25):
         raise TimeoutError("蓝牙扫描超时")
     return {"devices": result}
 
