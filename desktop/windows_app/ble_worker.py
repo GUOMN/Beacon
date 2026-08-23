@@ -107,26 +107,31 @@ def scan_status_devices(result_callback: Callable[[list[dict[str, object]]], Non
     """在独立线程扫描所有状态灯板，避免阻塞 Tk 主线程。"""
     async def scan() -> None:
         status_callback("正在扫描附近灯板")
-        # macOS 首次使用蓝牙时会在 discover 过程中弹权限确认。CoreBluetooth
-        # 会立即中断这一轮扫描，即使用户随后点了允许，因此授权后自动重试。
-        attempts = 3 if sys.platform == "darwin" else 1
-        discovered = {}
-        last_error: Exception | None = None
-        for attempt in range(attempts):
+        discovered = await BleakScanner.discover(timeout=5, return_adv=True)
+
+        # macOS 首次 discover 会触发系统权限弹窗，并可能在用户选择前就返回空结果。
+        # 不能立即反复 discover，否则会连续创建 CoreBluetooth manager，导致权限弹窗重复。
+        # 这里只等待同一次授权完成，确认允许后最多补扫一次。
+        if sys.platform == "darwin" and not discovered:
             try:
-                discovered = await BleakScanner.discover(timeout=5, return_adv=True)
-                last_error = None
-                if discovered or sys.platform != "darwin":
-                    break
-            except Exception as exc:
-                last_error = exc
-                if sys.platform != "darwin" or attempt == attempts - 1:
-                    raise
-            if attempt < attempts - 1:
-                status_callback("蓝牙权限已请求，正在自动重试扫描")
-                await asyncio.sleep(2.5)
-        if last_error is not None:
-            raise last_error
+                from CoreBluetooth import CBCentralManager
+
+                authorization = int(CBCentralManager.authorization())
+                if authorization == 0:  # CBManagerAuthorizationNotDetermined
+                    status_callback("等待蓝牙权限确认")
+                    for _ in range(60):
+                        await asyncio.sleep(0.5)
+                        authorization = int(CBCentralManager.authorization())
+                        if authorization != 0:
+                            break
+                if authorization == 3:  # CBManagerAuthorizationAllowedAlways
+                    status_callback("蓝牙权限已允许，正在继续扫描")
+                    discovered = await BleakScanner.discover(timeout=5, return_adv=True)
+                elif authorization in (1, 2):
+                    raise PermissionError("蓝牙权限未允许，请在系统设置的隐私与安全中允许 Beacon 使用蓝牙")
+            except ImportError:
+                # 非打包调试环境可能没有 PyObjC；保留首轮扫描结果，不重复触发权限。
+                pass
         devices: list[dict[str, object]] = []
         for device, advertisement in discovered.values():
             name = advertisement.local_name or device.name

@@ -30,6 +30,7 @@ jobs:
             --paths desktop --collect-all bleak --collect-all psutil \
             --collect-submodules codex_status_core \
             --hidden-import windows_app.ble_worker \
+            --hidden-import CoreBluetooth \
             desktop/tauri_bridge.py
       - uses: actions/upload-artifact@v4
         with:
