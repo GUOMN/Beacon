@@ -29,6 +29,8 @@ class WindowsDashboardApp:
         self.root.title("Codex 状态灯")
         self.root.geometry("1120x760")
         self.root.minsize(860, 640)
+        self._settings_path = Path(os.getenv("APPDATA", str(Path.home()))) / \
+            "CodexStatusBridge" / "settings.json"
 
         self._events: queue.SimpleQueue[object] = queue.SimpleQueue()
         self._snapshot = DashboardSnapshot()
@@ -72,8 +74,6 @@ class WindowsDashboardApp:
         self._style_previews: dict[TaskState, tk.Label] = {}
         self._device_tree: ttk.Treeview | None = None
         self._scanned_devices: dict[str, dict[str, object]] = {}
-        self._settings_path = Path(os.getenv("APPDATA", str(Path.home()))) / \
-            "CodexStatusBridge" / "settings.json"
         for key, value in self._load_busy_weights().items():
             self._busy_weight_vars[key].set(value)
         self._busy_weights_cache = tuple(float(value.get()) for value in self._busy_weight_vars.values())
