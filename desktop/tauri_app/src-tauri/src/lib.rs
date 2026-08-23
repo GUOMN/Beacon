@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::{io::{BufRead, BufReader, Write}, path::PathBuf, process::{Child, ChildStdin, ChildStdout, Command, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering}}};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use btleplug::api::{Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType};
-use btleplug::platform::{Manager as BleManager, Peripheral as BlePeripheral};
+use btleplug::platform::{Adapter as BleAdapter, Manager as BleManager, Peripheral as BlePeripheral};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 use tauri::{Manager, WindowEvent};
@@ -96,8 +96,23 @@ impl Drop for ForegroundGuard {
 }
 
 const DEVICE_PREFIX: &str = "Codex-Light-";
+const SERVICE_UUID: &str = "0100c310-7625-819e-934c-32b8e4177d6a";
 const CONTROL_UUID: &str = "0200c310-7625-819e-934c-32b8e4177d6a";
 const OTA_UUID: &str = "0300c310-7625-819e-934c-32b8e4177d6a";
+const GAP_DEVICE_NAME_UUID: &str = "00002a00-0000-1000-8000-00805f9b34fb";
+
+fn status_scan_filter() -> Result<ScanFilter, String> {
+    Ok(ScanFilter {
+        services: vec![Uuid::parse_str(SERVICE_UUID).map_err(|error| error.to_string())?],
+    })
+}
+
+fn device_id_from_name(name: &str) -> Option<String> {
+    let start = name.find(DEVICE_PREFIX)? + DEVICE_PREFIX.len();
+    let device_id: String = name[start..].chars().take(6).collect();
+    (device_id.len() == 6 && device_id.chars().all(|value| value.is_ascii_hexdigit()))
+        .then(|| device_id.to_ascii_uppercase())
+}
 
 fn characteristic(peripheral: &BlePeripheral, uuid: &str) -> Result<Characteristic, String> {
     let uuid = Uuid::parse_str(uuid).map_err(|error| error.to_string())?;
@@ -109,19 +124,45 @@ async fn connect_peripheral(address: Option<&str>, device_id: Option<&str>) -> R
     let manager = BleManager::new().await.map_err(|error| format!("蓝牙初始化失败：{error}"))?;
     let adapters = manager.adapters().await.map_err(|error| format!("读取蓝牙适配器失败：{error}"))?;
     for adapter in &adapters {
-        adapter.start_scan(ScanFilter::default()).await.map_err(|error| format!("启动蓝牙扫描失败：{error}"))?;
+        adapter.start_scan(status_scan_filter()?).await.map_err(|error| format!("启动蓝牙扫描失败：{error}"))?;
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let fallback_at = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    let mut fallback_started = false;
     loop {
         for adapter in &adapters {
             for peripheral in adapter.peripherals().await.map_err(|error| error.to_string())? {
                 let id_matches = address.is_some_and(|value| peripheral.id().to_string() == value);
-                let name_matches = if let Some(expected) = device_id {
-                    peripheral.properties().await.map_err(|error| error.to_string())?
-                        .and_then(|props| props.local_name)
-                        .and_then(|name| name.strip_prefix(DEVICE_PREFIX).map(str::to_owned))
+                let properties = peripheral.properties().await.map_err(|error| error.to_string())?;
+                let mut name_matches = device_id.is_some_and(|expected| {
+                    properties.as_ref().and_then(|props| props.local_name.as_deref())
+                        .and_then(device_id_from_name)
                         .is_some_and(|value| value.eq_ignore_ascii_case(expected))
-                } else { false };
+                });
+                // CoreBluetooth can report the advertised service before it
+                // reports the scan-response local name. Connect only to this
+                // service-filtered candidate and read the standard GAP name.
+                if !id_matches && !name_matches && device_id.is_some() {
+                    if !peripheral.is_connected().await.unwrap_or(false)
+                        && peripheral.connect().await.is_err() {
+                        continue;
+                    }
+                    if peripheral.discover_services().await.is_ok() {
+                        if let Ok(name_uuid) = Uuid::parse_str(GAP_DEVICE_NAME_UUID) {
+                            if let Some(name_characteristic) = peripheral.characteristics()
+                                .into_iter().find(|item| item.uuid == name_uuid) {
+                                if let Ok(bytes) = peripheral.read(&name_characteristic).await {
+                                    name_matches = std::str::from_utf8(&bytes).ok()
+                                        .and_then(device_id_from_name)
+                                        .is_some_and(|value| value.eq_ignore_ascii_case(device_id.unwrap()));
+                                }
+                            }
+                        }
+                    }
+                    if !name_matches {
+                        let _ = peripheral.disconnect().await;
+                    }
+                }
                 if id_matches || name_matches {
                     for item in &adapters { let _ = item.stop_scan().await; }
                     if !peripheral.is_connected().await.unwrap_or(false) {
@@ -133,10 +174,76 @@ async fn connect_peripheral(address: Option<&str>, device_id: Option<&str>) -> R
             }
         }
         if tokio::time::Instant::now() >= deadline { break; }
+        if cfg!(target_os = "macos") && !fallback_started
+            && tokio::time::Instant::now() >= fallback_at {
+            for adapter in &adapters {
+                let _ = adapter.stop_scan().await;
+                let _ = adapter.start_scan(ScanFilter::default()).await;
+            }
+            fallback_started = true;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     for adapter in &adapters { let _ = adapter.stop_scan().await; }
     Err("没有发现目标灯板".into())
+}
+
+async fn discovered_status_boards(adapters: &[BleAdapter]) -> Result<(Vec<Value>, usize, usize, usize), String> {
+    let mut devices: Vec<Value> = Vec::new();
+    let mut observed = 0usize;
+    let mut candidates = 0usize;
+    let mut unresolved = 0usize;
+    let service_uuid = Uuid::parse_str(SERVICE_UUID).map_err(|error| error.to_string())?;
+    let name_uuid = Uuid::parse_str(GAP_DEVICE_NAME_UUID).map_err(|error| error.to_string())?;
+    for adapter in adapters {
+        let peripherals = adapter.peripherals().await
+            .map_err(|error| format!("读取蓝牙设备失败：{error}"))?;
+        for peripheral in peripherals {
+            observed += 1;
+            let Some(properties) = peripheral.properties().await
+                .map_err(|error| format!("读取设备属性失败：{error}"))? else { continue };
+            let advertised_name = properties.local_name.clone();
+            let service_matches = properties.services.iter().any(|value| *value == service_uuid);
+            let mut device_id = advertised_name.as_deref().and_then(device_id_from_name);
+            if service_matches || device_id.is_some() { candidates += 1; }
+            let mut resolved_name = advertised_name;
+            if device_id.is_none() && service_matches {
+                let was_connected = peripheral.is_connected().await.unwrap_or(false);
+                if (was_connected || peripheral.connect().await.is_ok())
+                    && peripheral.discover_services().await.is_ok() {
+                    if let Some(name_characteristic) = peripheral.characteristics()
+                        .into_iter().find(|item| item.uuid == name_uuid) {
+                        if let Ok(bytes) = peripheral.read(&name_characteristic).await {
+                            if let Ok(name) = String::from_utf8(bytes) {
+                                device_id = device_id_from_name(&name);
+                                resolved_name = Some(name);
+                            }
+                        }
+                    }
+                }
+                if !was_connected { let _ = peripheral.disconnect().await; }
+            }
+            let Some(device_id) = device_id else {
+                if service_matches { unresolved += 1; }
+                continue;
+            };
+            if devices.iter().any(|item| item.get("device_id").and_then(Value::as_str) == Some(&device_id)) {
+                continue;
+            }
+            devices.push(serde_json::json!({
+                "name": resolved_name.unwrap_or_else(|| format!("{DEVICE_PREFIX}{device_id}")),
+                "device_id": device_id,
+                "address": peripheral.id().to_string(),
+                "rssi": properties.rssi,
+                "connected": peripheral.is_connected().await.unwrap_or(false),
+            }));
+        }
+    }
+    devices.sort_by(|left, right| {
+        right.get("rssi").and_then(Value::as_i64)
+            .cmp(&left.get("rssi").and_then(Value::as_i64))
+    });
+    Ok((devices, observed, candidates, unresolved))
 }
 
 fn start_bridge_process() -> Result<BridgeProcess, String> {
@@ -252,47 +359,55 @@ async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, St
     if adapters.is_empty() {
         return Err("未找到可用的蓝牙适配器".into());
     }
-    for adapter in &adapters {
-        adapter.start_scan(ScanFilter::default()).await
-            .map_err(|error| format!("启动蓝牙扫描失败：{error}"))?;
-    }
-    // Keep the first scan alive while macOS presents and records the one-time
-    // Bluetooth permission sheet. The same signed app process continues the
-    // scan after approval instead of returning an early empty result.
-    let scan_seconds = if cfg!(target_os = "macos") { 12 } else { 4 };
-    tokio::time::sleep(std::time::Duration::from_secs(scan_seconds)).await;
-
-    let mut devices: Vec<Value> = Vec::new();
-    for adapter in &adapters {
-        let peripherals = adapter.peripherals().await
-            .map_err(|error| format!("读取蓝牙设备失败：{error}"))?;
-        for peripheral in peripherals {
-            let Some(properties) = peripheral.properties().await
-                .map_err(|error| format!("读取设备属性失败：{error}"))? else { continue };
-            let Some(name) = properties.local_name else { continue };
-            let Some(device_id) = name.strip_prefix(DEVICE_PREFIX) else { continue };
-            let device_id = device_id.to_ascii_uppercase();
-            if device_id.len() != 6 || !device_id.chars().all(|value| value.is_ascii_hexdigit()) {
-                continue;
+    let macos = cfg!(target_os = "macos");
+    let started_at = tokio::time::Instant::now();
+    let deadline = started_at
+        + std::time::Duration::from_secs(if macos { 30 } else { 4 });
+    let fallback_at = started_at + std::time::Duration::from_secs(12);
+    let mut restart_at = tokio::time::Instant::now();
+    let mut last_start_error: Option<String> = None;
+    let devices = loop {
+        if tokio::time::Instant::now() >= restart_at {
+            for adapter in &adapters {
+                let filter = if macos && tokio::time::Instant::now() >= fallback_at {
+                    ScanFilter::default()
+                } else {
+                    status_scan_filter()?
+                };
+                if let Err(error) = adapter.start_scan(filter).await {
+                    last_start_error = Some(format!("启动蓝牙扫描失败：{error}"));
+                }
             }
-            if devices.iter().any(|item| item.get("device_id").and_then(Value::as_str) == Some(&device_id)) {
-                continue;
-            }
-            devices.push(serde_json::json!({
-                "name": name,
-                "device_id": device_id,
-                "address": peripheral.id().to_string(),
-                "rssi": properties.rssi,
-                "connected": peripheral.is_connected().await.unwrap_or(false),
-            }));
+            // macOS does not reliably resume the CoreBluetooth scan that
+            // triggered the first permission sheet. Restart it in the same
+            // foreground operation so approval is followed by a real scan.
+            restart_at = if macos {
+                tokio::time::Instant::now() + std::time::Duration::from_secs(3)
+            } else {
+                deadline + std::time::Duration::from_secs(1)
+            };
         }
-        let _ = adapter.stop_scan().await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let found = discovered_status_boards(&adapters).await?;
+        if !found.0.is_empty() || tokio::time::Instant::now() >= deadline {
+            break found;
+        }
+        if macos && tokio::time::Instant::now() >= restart_at {
+            for adapter in &adapters { let _ = adapter.stop_scan().await; }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    };
+    for adapter in &adapters { let _ = adapter.stop_scan().await; }
+    let (devices, observed_count, candidate_count, unresolved_count) = devices;
+    if devices.is_empty() {
+        if let Some(error) = last_start_error { return Err(error); }
     }
-    devices.sort_by(|left, right| {
-        right.get("rssi").and_then(Value::as_i64)
-            .cmp(&left.get("rssi").and_then(Value::as_i64))
-    });
-    Ok(serde_json::json!({"devices": devices}))
+    Ok(serde_json::json!({
+        "devices": devices,
+        "observed_count": observed_count,
+        "candidate_count": candidate_count,
+        "unresolved_count": unresolved_count,
+    }))
 }
 
 #[tauri::command]
