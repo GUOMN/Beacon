@@ -1,4 +1,4 @@
-name: Build macOS ARM64 DMG
+name: Build macOS Universal DMG
 
 on:
   workflow_dispatch:
@@ -26,7 +26,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Install desktop dependencies
         run: |
@@ -41,14 +41,14 @@ jobs:
         working-directory: desktop
         run: python -m unittest discover -s tests -v
 
-      - name: Build ARM64 DMG
+      - name: Build Universal DMG
         working-directory: desktop/tauri_app
-        run: pnpm tauri build --target aarch64-apple-darwin --bundles dmg
+        run: pnpm tauri build --target universal-apple-darwin --bundles dmg
 
       - name: Upload temporary DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexStatusBridge-macOS-arm64-DMG
-          path: desktop/tauri_app/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          name: CodexStatusBridge-macOS-Universal-DMG
+          path: desktop/tauri_app/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
           retention-days: 14
