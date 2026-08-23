@@ -33,9 +33,9 @@ function App(){
  useEffect(()=>{const handler=(event:Event)=>{const detail=(event as CustomEvent).detail;setSaveState(detail==="success"?"success":"error");setTimeout(()=>setSaveState("idle"),2200)};window.addEventListener("save-result",handler);return()=>window.removeEventListener("save-result",handler)},[]);
  return <div className="shell">
   <aside>
-   <div className="brand"><span className="brandmark"><Sparkles size={19}/></span><div><strong>Codex Status</strong><small>Bridge</small></div></div>
+   <div className="brand"><span className="brandmark"><Sparkles size={19}/></span><div><strong>Beacon</strong><small>信标</small></div></div>
    <nav><button className={page==="tasks"?"active":""} onClick={()=>setPage("tasks")}><Activity/>任务面板</button><button className={page==="settings"?"active":""} onClick={()=>setPage("settings")}><Settings/>配置</button></nav>
-   <div className="device"><div className="device-title"><span className={backendError?"":"online"}/><span>{backendError?"后台未连接":"本地核心已连接"}</span><Bluetooth size={15}/></div><strong>Codex Light · 6 灯</strong><small>{backendError||"SQLite / Codex 实时同步"}</small></div>
+   <div className="device"><div className="device-title"><span className={backendError?"":"online"}/><span>{backendError?"后台未连接":"本地核心已连接"}</span><Bluetooth size={15}/></div><strong>Beacon Light · 6 灯</strong><small>{backendError||"SQLite / 多来源实时同步"}</small></div>
    <div className="version">v0.1.0 · 本地运行</div>
   </aside>
   <main>

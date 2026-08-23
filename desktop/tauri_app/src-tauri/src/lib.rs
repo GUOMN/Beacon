@@ -167,7 +167,7 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&show, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("缺少应用图标").clone())
-                .tooltip("Codex Status Bridge")
+                .tooltip("Beacon · 信标")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -204,5 +204,5 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![get_dashboard, scan_devices, bridge_action])
         .run(tauri::generate_context!())
-        .expect("error while running Codex Status Bridge");
+        .expect("error while running Beacon");
 }

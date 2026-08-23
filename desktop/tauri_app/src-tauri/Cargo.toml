@@ -1,8 +1,8 @@
 [package]
 name = "codex-status-bridge"
 version = "0.1.0"
-description = "Codex Status Bridge desktop shell"
-authors = ["Codex Status Bridge"]
+description = "Beacon desktop status light"
+authors = ["Beacon"]
 edition = "2021"
 
 [lib]

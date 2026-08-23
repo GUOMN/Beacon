@@ -1,4 +1,4 @@
-# Codex Status Bridge
+# Beacon · 信标
 
 [English](#english) · 中文
 
@@ -73,7 +73,7 @@ ESP32-C3 ──▶ 在本地运行灯光动画 ──▶ WS2812 灯带
 
 ## English
 
-Codex Status Bridge displays computer task states on a WS2812 LED strip. The first LED represents system activity; every following LED represents a task.
+Beacon displays computer task states on a WS2812 LED strip. The first LED represents system activity; every following LED represents a task.
 
 ### Hardware
 
