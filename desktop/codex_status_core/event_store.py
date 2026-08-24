@@ -6,10 +6,11 @@ import platform
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .models import TaskSlot, TaskState
 
@@ -50,10 +51,20 @@ class StatusEventStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open one short-lived SQLite transaction and always release its file handles."""
         connection = sqlite3.connect(self.path, timeout=2)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            yield connection
+        except Exception:
+            connection.rollback()
+            raise
+        else:
+            connection.commit()
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._connect() as database:
@@ -236,7 +247,9 @@ class StatusEventStore:
                     FROM task_events
                 )
                 SELECT task_id,title,source FROM ranked
-                WHERE position=1 AND state IN ('running','waiting')
+                WHERE position=1
+                  AND state IN ('running','waiting')
+                  AND source <> 'codex-live'
                 """
             ).fetchall()
             database.executemany(

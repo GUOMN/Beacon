@@ -115,7 +115,7 @@ def manage_tasks(payload: dict[str, object]) -> dict[str, object]:
         completed = [
             str(record["task_id"])
             for record in store.latest_records(500)
-            if record.get("state") == "success"
+            if record.get("state") == "success" and not bool(record.get("pinned"))
         ]
         store.delete_tasks(completed)
     elif operation == "pin":

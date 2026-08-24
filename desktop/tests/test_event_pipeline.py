@@ -8,7 +8,7 @@ from unittest.mock import patch
 from codex_status_core.event_store import StatusEventStore
 from codex_status_core.codex_session_source import CodexSessionSource
 from codex_status_core.hook_manager import HookProvider, install, status, uninstall
-from tauri_bridge import data_sources, set_data_source
+from tauri_bridge import data_sources, manage_tasks, set_data_source
 
 
 class EventPipelineTests(unittest.TestCase):
@@ -29,6 +29,24 @@ class EventPipelineTests(unittest.TestCase):
             store.record(event)
             with store._connect() as database:
                 self.assertEqual(database.execute("SELECT COUNT(*) FROM task_events").fetchone()[0], 1)
+
+    def test_database_connections_close_after_each_operation(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            store = StatusEventStore(Path(folder) / "events.sqlite")
+            with store._connect() as database:
+                self.assertEqual(database.execute("SELECT 1").fetchone()[0], 1)
+            with self.assertRaises(sqlite3.ProgrammingError):
+                database.execute("SELECT 1")
+
+    def test_startup_does_not_fail_active_codex_live_task(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            store = StatusEventStore(Path(folder) / "events.sqlite")
+            store.record({"task_id": "codex-live", "title": "Codex", "state": "running", "source": "codex-live"})
+            store.record({"task_id": "hook", "title": "Hook", "state": "waiting", "source": "claude"})
+            store.fail_interrupted_tasks()
+            records = {record["task_id"]: record["state"] for record in store.latest_records()}
+            self.assertEqual(records["codex-live"], "running")
+            self.assertEqual(records["hook"], "failure")
 
     def test_old_summary_column_is_removed_during_migration(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
@@ -102,6 +120,20 @@ class EventPipelineTests(unittest.TestCase):
             with store._connect() as database:
                 self.assertEqual(database.execute("SELECT COUNT(*) FROM task_usage WHERE task_id='one'").fetchone()[0], 0)
 
+    def test_delete_completed_keeps_pinned_tasks(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            store = StatusEventStore(Path(folder) / "events.sqlite")
+            store.record({"task_id": "pinned-success", "title": "固定完成", "state": "success"})
+            store.record({"task_id": "plain-success", "title": "普通完成", "state": "success"})
+            store.record({"task_id": "running", "title": "进行中", "state": "running"})
+            store.set_pinned("pinned-success", True)
+            with patch("tauri_bridge.StatusEventStore", return_value=store):
+                manage_tasks({"operation": "delete-completed"})
+            self.assertEqual(
+                {record["task_id"] for record in store.latest_records()},
+                {"pinned-success", "running"},
+            )
+
     def test_codex_live_events_map_to_task_states(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             store = StatusEventStore(Path(folder) / "events.sqlite")
@@ -113,6 +145,36 @@ class EventPipelineTests(unittest.TestCase):
             self.assertEqual(record["state"], "running")
             source._consume("thread", {"type": "event_msg", "payload": {"type": "task_complete"}})
             self.assertEqual(store.latest_records()[0]["state"], "success")
+
+    def test_codex_live_events_mark_approval_and_tool_failures(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            store = StatusEventStore(Path(folder) / "events.sqlite")
+            source = CodexSessionSource(store, lambda _message: None)
+            source._titles["thread"] = "灯板任务"
+            source._consume("thread", {"type": "event_msg", "payload": {"type": "task_started"}})
+            source._consume("thread", {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "call_id": "approval-call",
+                    "input": '{"sandbox_permissions":"require_escalated"}',
+                },
+            })
+            self.assertEqual(store.latest_records()[0]["state"], "waiting")
+            source._consume("thread", {
+                "type": "response_item",
+                "payload": {"type": "custom_tool_call_output", "call_id": "approval-call", "output": [{"type": "input_text", "text": "Approval denied"}]},
+            })
+            self.assertEqual(store.latest_records()[0]["state"], "failure")
+            source._consume("thread", {
+                "type": "response_item",
+                "payload": {"type": "custom_tool_call", "call_id": "failed-call", "input": "{}"},
+            })
+            source._consume("thread", {
+                "type": "response_item",
+                "payload": {"type": "custom_tool_call_output", "call_id": "failed-call", "output": {"exit_code": 1}},
+            })
+            self.assertEqual(store.latest_records()[0]["state"], "failure")
 
 
 if __name__ == "__main__":

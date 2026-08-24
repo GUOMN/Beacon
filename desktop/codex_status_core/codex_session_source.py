@@ -13,6 +13,28 @@ from .event_store import StatusEventStore
 
 
 THREAD_ID_PATTERN = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+FAILED_TOOL_STATUSES = {"error", "failed", "failure", "denied", "rejected", "cancelled", "canceled"}
+
+
+def _tool_output_failed(value: Any) -> bool:
+    """Return whether a completed Codex tool call reports an error or rejection."""
+    if isinstance(value, dict):
+        for key in ("is_error", "isError"):
+            if value.get(key) is True:
+                return True
+        for key in ("exit_code", "exitCode"):
+            code = value.get(key)
+            if isinstance(code, int) and code != 0:
+                return True
+        status = value.get("status")
+        if isinstance(status, str) and status.lower() in FAILED_TOOL_STATUSES:
+            return True
+        return any(_tool_output_failed(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_tool_output_failed(item) for item in value)
+    if isinstance(value, str):
+        return bool(re.search(r"\b(?:approval\s+)?(?:denied|rejected|cancelled|canceled)\b|\b(?:tool|command|script|execution)\s+failed\b", value, re.IGNORECASE))
+    return False
 
 
 class CodexSessionSource:
@@ -25,6 +47,7 @@ class CodexSessionSource:
         self._offsets: dict[Path, int] = {}
         self._titles: dict[str, str] = {}
         self._waiting_calls: dict[str, set[str]] = {}
+        self._tool_calls: dict[str, set[str]] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -133,21 +156,27 @@ class CodexSessionSource:
             state = "success"
         elif envelope_type == "event_msg" and event_type == "turn_aborted":
             state = "warning"
-        elif envelope_type == "response_item" and event_type == "custom_tool_call":
+        elif envelope_type == "response_item" and event_type in {"custom_tool_call", "function_call"}:
             call_id = str(payload.get("call_id") or payload.get("id") or "")
+            if call_id:
+                self._tool_calls.setdefault(thread_id, set()).add(call_id)
             try:
-                arguments = json.loads(payload.get("input") or "{}")
+                raw_arguments = payload.get("input") or payload.get("arguments") or "{}"
+                arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
             except (json.JSONDecodeError, TypeError):
                 arguments = {}
-            if arguments.get("sandbox_permissions") == "require_escalated" or arguments.get("require_approval") is True:
+            if isinstance(arguments, dict) and (arguments.get("sandbox_permissions") == "require_escalated" or arguments.get("require_approval") is True):
                 self._waiting_calls.setdefault(thread_id, set()).add(call_id)
                 state = "waiting"
         elif envelope_type == "response_item" and event_type in {"custom_tool_call_output", "function_call_output"}:
             call_id = str(payload.get("call_id") or "")
             waiting = self._waiting_calls.setdefault(thread_id, set())
+            known_call = call_id in self._tool_calls.setdefault(thread_id, set())
             if call_id in waiting:
                 waiting.discard(call_id)
-                state = "running"
+                state = "failure" if _tool_output_failed(payload) else "running"
+            elif known_call and _tool_output_failed(payload):
+                state = "failure"
         if state is None:
             return
         self._store.record({
