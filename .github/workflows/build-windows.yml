@@ -1,4 +1,4 @@
-name: Build Windows Installer
+name: Build Windows Packages
 
 on:
   workflow_dispatch:
@@ -52,15 +52,37 @@ jobs:
           corepack prepare pnpm@11.19.0 --activate
           pnpm install --frozen-lockfile
 
-      - name: Build Windows installers
+      - name: Build Windows setup installer
         working-directory: desktop/tauri_app
-        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis,msi
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Build Windows portable archive
+        shell: pwsh
+        run: |
+          $release = "desktop/tauri_app/src-tauri/target/x86_64-pc-windows-msvc/release"
+          $portable = "artifacts/windows/Beacon-Windows-x64-Portable"
+          New-Item -ItemType Directory -Force $portable | Out-Null
+          Copy-Item "$release/Beacon.exe" "$portable/Beacon.exe"
+          @'
+          Beacon portable edition
+
+          This edition does not include the Python backend. It uses the Python
+          runtime and Python dependencies already installed on this Windows PC.
+
+          Requirements:
+          - Windows 10/11 with Microsoft Edge WebView2 Runtime
+          - Python 3.11+ available on PATH
+          - Dependencies: python -m pip install -r desktop/requirements.txt
+
+          For a self-contained installation, use Beacon-Windows-x64-Setup.exe.
+          '@ | Set-Content -Encoding utf8 "$portable/README.txt"
+          Compress-Archive -Path "$portable/*" -DestinationPath "artifacts/windows/Beacon-Windows-x64-Portable.zip" -Force
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Beacon-Windows-x64-Installers
+          name: Beacon-Windows-x64-Packages
           path: |
             desktop/tauri_app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-            desktop/tauri_app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            artifacts/windows/Beacon-Windows-x64-Portable.zip
           if-no-files-found: error
           retention-days: 14
