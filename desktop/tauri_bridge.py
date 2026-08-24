@@ -138,13 +138,14 @@ def data_sources(_payload: dict[str, object] | None = None) -> dict[str, object]
     result: list[dict[str, object]] = []
     for provider in hook_providers():
         if provider.key == "codex":
+            current = hook_status(provider)
             result.append({
                 "key": provider.key,
                 "name": provider.name,
-                "status": "正在运行",
-                "enabled": True,
-                "manageable": False,
-                "note": "内置实时会话采集，随 Beacon 自动启动",
+                "status": current,
+                "enabled": current == "已启用",
+                "manageable": provider.supported,
+                "note": "内置 JSONL 采集持续运行；此开关仅管理 Beacon 的官方 Hook 订阅",
             })
             continue
         current = hook_status(provider)
@@ -164,8 +165,6 @@ def set_data_source(payload: dict[str, object]) -> dict[str, object]:
     selected = next((provider for provider in hook_providers() if provider.key == key), None)
     if selected is None:
         raise ValueError("未知的数据源")
-    if selected.key == "codex":
-        raise ValueError("Codex 是 Beacon 内置数据源，始终随客户端运行")
     if bool(payload.get("enabled")):
         install_hook(selected)
     else:

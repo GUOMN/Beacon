@@ -115,6 +115,20 @@ class EventPipelineTests(unittest.TestCase):
                 disabled = set_data_source({"key": "claude", "enabled": False})
                 self.assertFalse(disabled["sources"][0]["enabled"])
 
+    def test_codex_hook_subscription_can_be_enabled_and_disabled(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            provider = HookProvider(
+                "codex", "Codex", Path(folder) / "hooks.json", (("PermissionRequest", "waiting"),)
+            )
+            with patch("tauri_bridge.hook_providers", return_value=(provider,)):
+                enabled = set_data_source({"key": "codex", "enabled": True})
+                self.assertTrue(enabled["sources"][0]["enabled"])
+                self.assertTrue(enabled["sources"][0]["manageable"])
+                disabled = set_data_source({"key": "codex", "enabled": False})
+                self.assertFalse(disabled["sources"][0]["enabled"])
+            contents = json.loads((Path(folder) / "hooks.json").read_text(encoding="utf-8"))
+            self.assertEqual(contents["hooks"], {})
+
     def test_active_sort_pin_and_delete_drive_lamp_snapshot(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             store = StatusEventStore(Path(folder) / "events.sqlite")
