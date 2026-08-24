@@ -78,20 +78,30 @@ class EventPipelineTests(unittest.TestCase):
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(data["hooks"]["Stop"][0]["hooks"][0]["command"], "existing")
 
-    def test_codex_notify_chains_and_restores_existing_callback(self) -> None:
+    def test_codex_hooks_preserve_existing_hooks_and_restore_legacy_notify(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
-            path = Path(folder) / "config.toml"
+            config_path = Path(folder) / "config.toml"
+            hooks_path = Path(folder) / "hooks.json"
             original = ["existing-notifier.exe", "turn-ended"]
-            path.write_text("notify = " + json.dumps(original) + "\n[features]\njs_repl = false\n", encoding="utf-8")
-            provider = HookProvider("codex", "Codex", path, (("notify", "success"),))
+            config_path.write_text(
+                "notify = [\"beacon\", \"--status-bridge-codex-notify\"]\n[features]\njs_repl = false\n",
+                encoding="utf-8",
+            )
+            hooks_path.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "existing"}]}]}}), encoding="utf-8")
+            provider = HookProvider("codex", "Codex", hooks_path, (("PermissionRequest", "waiting"), ("Stop", "success")))
             with patch("codex_status_core.hook_manager._codex_backup_path", return_value=Path(folder) / "backup.json"):
+                (Path(folder) / "backup.json").write_text(json.dumps({"notify": original}), encoding="utf-8")
                 install(provider)
                 self.assertEqual(status(provider), "已启用")
-                self.assertIn("--status-bridge-codex-notify", path.read_text(encoding="utf-8"))
+                installed = json.loads(hooks_path.read_text(encoding="utf-8"))
+                self.assertEqual(len(installed["hooks"]["Stop"]), 2)
+                self.assertIn("PermissionRequest", installed["hooks"])
+                self.assertIn("hooks = true", config_path.read_text(encoding="utf-8"))
+                self.assertIn("existing-notifier.exe", config_path.read_text(encoding="utf-8"))
                 uninstall(provider)
-            restored = path.read_text(encoding="utf-8")
-            self.assertIn("existing-notifier.exe", restored)
-            self.assertIn("[features]", restored)
+            restored = json.loads(hooks_path.read_text(encoding="utf-8"))
+            self.assertEqual(restored["hooks"]["Stop"][0]["hooks"][0]["command"], "existing")
+            self.assertNotIn("PermissionRequest", restored["hooks"])
 
     def test_data_source_management_reports_and_changes_real_hook_state(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:

@@ -14,6 +14,7 @@ EVENT_STATES = {
     "gemini": {"BeforeAgent": "running", "Notification": "waiting", "AfterAgent": "success"},
     "cursor": {"beforeSubmitPrompt": "running", "stop": "success", "postToolUseFailure": "warning"},
     "copilot": {"sessionStart": "running", "permissionRequest": "waiting", "agentStop": "success", "errorOccurred": "failure"},
+    "codex": {"SessionStart": "running", "UserPromptSubmit": "running", "PreToolUse": "running", "PostToolUse": "running", "PermissionRequest": "waiting", "Stop": "success", "SessionEnd": "success"},
 }
 
 
