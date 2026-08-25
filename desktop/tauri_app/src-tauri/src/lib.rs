@@ -60,6 +60,10 @@ fn materialize_embedded_bridge() -> Result<PathBuf, String> {
             include_bytes!("../../../codex_status_core/codex_session_source.py"),
         ),
         (
+            "codex_status_core/custom_source.py",
+            include_bytes!("../../../codex_status_core/custom_source.py"),
+        ),
+        (
             "codex_status_core/event_store.py",
             include_bytes!("../../../codex_status_core/event_store.py"),
         ),
@@ -1169,6 +1173,11 @@ mod tests {
             .parent()
             .expect("bridge directory")
             .join("codex_status_core/hook_manager.py")
+            .is_file());
+        assert!(script
+            .parent()
+            .expect("bridge directory")
+            .join("codex_status_core/custom_source.py")
             .is_file());
     }
 

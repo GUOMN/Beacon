@@ -17,6 +17,11 @@ desktop/tauri_app/node_modules/
 desktop/tauri_app/dist/
 desktop/tauri_app/src-tauri/target/
 desktop/tauri_app/tsconfig.tsbuildinfo
+.pnpm-store/
+*.spec
+desktop/tauri_app/src-tauri/binaries/bridge-*
+desktop/tauri_app/src-tauri/binaries/libbeacon_macos_ble.dylib
+desktop/tauri_app/src-tauri/gen/schemas/
 artifacts/
 dist/
 *.pyc
@@ -30,3 +35,7 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# 本机私有数据源适配器与配置（禁止提交）
+.beacon-local/
+custom-sources.json

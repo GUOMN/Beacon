@@ -48,6 +48,7 @@ class CodexSessionSource:
         self._titles: dict[str, str] = {}
         self._waiting_calls: dict[str, set[str]] = {}
         self._tool_calls: dict[str, set[str]] = {}
+        self._failed_threads: set[str] = set()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -67,6 +68,10 @@ class CodexSessionSource:
 
     def stop(self) -> None:
         self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        self._thread = None
 
     def _run(self) -> None:
         while not self._stop.wait(0.5):
@@ -151,9 +156,10 @@ class CodexSessionSource:
             return
         state: str | None = None
         if envelope_type == "event_msg" and event_type == "task_started":
+            self._failed_threads.discard(thread_id)
             state = "running"
         elif envelope_type == "event_msg" and event_type == "task_complete":
-            state = "success"
+            state = "failure" if thread_id in self._failed_threads else "success"
         elif envelope_type == "event_msg" and event_type == "turn_aborted":
             state = "warning"
         elif envelope_type == "response_item" and event_type in {"custom_tool_call", "function_call"}:
@@ -179,6 +185,8 @@ class CodexSessionSource:
                 state = "failure"
         if state is None:
             return
+        if state == "failure":
+            self._failed_threads.add(thread_id)
         self._store.record({
             "task_id": task_id,
             "title": title,

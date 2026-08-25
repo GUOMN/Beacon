@@ -1,17 +1,137 @@
 import json
+import socket
 import sqlite3
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from codex_status_core.event_store import StatusEventStore
 from codex_status_core.codex_session_source import CodexSessionSource
+from codex_status_core.custom_source import (
+    CustomSourceRegistry,
+    CustomSourceSupervisor,
+    adapter_envelope,
+    normalize_config,
+    validate_config,
+)
 from codex_status_core.hook_manager import HookProvider, install, status, uninstall
-from tauri_bridge import data_sources, manage_tasks, set_data_source
+from codex_status_core.hook_adapter import _hook_payload_failed
+from tauri_bridge import data_sources, delete_custom_source, manage_tasks, save_custom_source, set_data_source
 
 
 class EventPipelineTests(unittest.TestCase):
+    def test_custom_source_registry_stays_in_local_config_file(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            path = Path(folder) / "custom-sources.json"
+            registry = CustomSourceRegistry(path)
+            source = registry.save({
+                "name": "本地工具",
+                "transport": "unix",
+                "socket_path": "/private/local/tool.socket",
+                "adapter_executable": "",
+                "enabled": False,
+            })
+            self.assertEqual(registry.get(source["id"])["socket_path"], "/private/local/tool.socket")
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], 1)
+
+    def test_custom_tcp_source_rejects_non_loopback_host(self) -> None:
+        source = normalize_config({"transport": "tcp", "host": "192.168.1.8", "enabled": False})
+        with self.assertRaisesRegex(ValueError, "回环地址"):
+            validate_config(source, require_complete=False)
+
+    def test_custom_adapter_contract_contains_only_generic_endpoint_metadata(self) -> None:
+        source = normalize_config({
+            "id": "local-source",
+            "transport": "tcp",
+            "host": "127.0.0.1",
+            "port": 9000,
+            "adapter_config_path": "/private/local/adapter.json",
+        })
+        envelope = adapter_envelope(source)
+        self.assertEqual(envelope["schema"], "beacon.custom-source/2")
+        self.assertNotIn("endpoint", envelope)
+        self.assertNotIn("protocol", envelope)
+
+    def test_custom_adapter_events_are_namespaced_and_normalized(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            store = StatusEventStore(Path(folder) / "events.sqlite")
+            registry = CustomSourceRegistry(Path(folder) / "custom-sources.json")
+            supervisor = CustomSourceSupervisor(store, registry)
+            source = normalize_config({"id": "private", "name": "本地工具"})
+            supervisor._consume(source, json.dumps({
+                "task_id": "task-1", "title": "转换后任务", "state": "waiting", "progress": 25,
+                "agent": "worker-a",
+            }))
+            record = store.latest_records()[0]
+            self.assertEqual(record["task_id"], "custom:private:task-1")
+            self.assertEqual(record["source"], "本地工具-worker-a")
+            self.assertEqual(record["state"], "waiting")
+
+    def test_custom_source_supervisor_runs_adapter_without_a_shell(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            root = Path(folder)
+            adapter = root / "adapter.py"
+            adapter.write_text(
+                "import json, sys\n"
+                "config = json.loads(sys.stdin.readline())\n"
+                "assert config['schema'] == 'beacon.custom-source/2'\n"
+                "for line in sys.stdin:\n"
+                "    message = json.loads(line)\n"
+                "    if message.get('type') == 'hello':\n"
+                "        print(json.dumps({'schema':'beacon.adapter-control/1','action':'send','data':'subscribe\\n'}), flush=True)\n"
+                "    elif message.get('type') == 'update':\n"
+                "        print(json.dumps({'task_id':'one','state':'running'}), flush=True)\n",
+                encoding="utf-8",
+            )
+            server_socket, beacon_socket = socket.socketpair()
+            received: list[bytes] = []
+
+            def serve() -> None:
+                with server_socket:
+                    server_socket.sendall(b'{"type":"hello"}\n')
+                    received.append(server_socket.recv(1024))
+                    server_socket.sendall(b'{"type":"update"}\n')
+
+            server = threading.Thread(target=serve, daemon=True)
+            server.start()
+            store = StatusEventStore(root / "events.sqlite")
+            registry = CustomSourceRegistry(root / "custom-sources.json")
+            registry.save({
+                "id": "adapter-test",
+                "name": "测试适配器",
+                "enabled": True,
+                "transport": "tcp",
+                "host": "127.0.0.1",
+                "port": 9000,
+                "adapter_executable": sys.executable,
+                "adapter_args": [str(adapter)],
+            })
+            supervisor = CustomSourceSupervisor(store, registry)
+            with patch.object(supervisor, "_connect", return_value=beacon_socket):
+                supervisor.start()
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and not store.latest_records():
+                    time.sleep(0.02)
+                supervisor.stop()
+            server.join(timeout=1)
+            self.assertEqual(received, [b"subscribe\n"])
+            self.assertEqual(store.latest_records()[0]["task_id"], "custom:adapter-test:one")
+
+    def test_custom_source_bridge_can_save_toggle_and_delete(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            registry = CustomSourceRegistry(Path(folder) / "custom-sources.json")
+            with patch("tauri_bridge._custom_registry", registry), patch("tauri_bridge._custom_supervisor", None):
+                saved = save_custom_source({"config": {"name": "本地工具", "enabled": False}})
+                custom = next(item for item in saved["sources"] if item.get("kind") == "custom")
+                self.assertFalse(custom["enabled"])
+                source_id = custom["config"]["id"]
+                delete_custom_source({"id": source_id})
+                self.assertEqual(registry.list(), [])
+
     def test_sqlite_snapshot_uses_latest_task_state(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             store = StatusEventStore(Path(folder) / "events.sqlite")
@@ -96,12 +216,28 @@ class EventPipelineTests(unittest.TestCase):
                 installed = json.loads(hooks_path.read_text(encoding="utf-8"))
                 self.assertEqual(len(installed["hooks"]["Stop"]), 2)
                 self.assertIn("PermissionRequest", installed["hooks"])
+                permission_hook = installed["hooks"]["PermissionRequest"][0]["hooks"][0]
+                self.assertEqual(permission_hook["timeout"], 86_400)
                 self.assertIn("hooks = true", config_path.read_text(encoding="utf-8"))
                 self.assertIn("existing-notifier.exe", config_path.read_text(encoding="utf-8"))
                 uninstall(provider)
             restored = json.loads(hooks_path.read_text(encoding="utf-8"))
             self.assertEqual(restored["hooks"]["Stop"][0]["hooks"][0]["command"], "existing")
             self.assertNotIn("PermissionRequest", restored["hooks"])
+
+    def test_codex_permission_hook_is_repaired_with_long_timeout(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            path = Path(folder) / "hooks.json"
+            provider = HookProvider("codex", "Codex", path, (("PermissionRequest", "waiting"),))
+            install(provider)
+            install(provider)
+            installed = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(installed["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"], 86_400)
+
+    def test_hook_failure_detection_marks_rejected_post_tool_results(self) -> None:
+        self.assertTrue(_hook_payload_failed({"success": False}))
+        self.assertTrue(_hook_payload_failed({"result": "Permission denied by user"}))
+        self.assertFalse(_hook_payload_failed({"success": True, "result": "ok"}))
 
     def test_data_source_management_reports_and_changes_real_hook_state(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
@@ -120,12 +256,21 @@ class EventPipelineTests(unittest.TestCase):
             provider = HookProvider(
                 "codex", "Codex", Path(folder) / "hooks.json", (("PermissionRequest", "waiting"),)
             )
-            with patch("tauri_bridge.hook_providers", return_value=(provider,)):
+            store = StatusEventStore(Path(folder) / "events.sqlite")
+            source = Mock()
+            with (
+                patch("tauri_bridge.hook_providers", return_value=(provider,)),
+                patch("tauri_bridge._runtime_store", store),
+                patch("tauri_bridge._codex_source", None),
+                patch("tauri_bridge.CodexSessionSource", return_value=source),
+            ):
                 enabled = set_data_source({"key": "codex", "enabled": True})
                 self.assertTrue(enabled["sources"][0]["enabled"])
                 self.assertTrue(enabled["sources"][0]["manageable"])
+                source.start.assert_called_once_with()
                 disabled = set_data_source({"key": "codex", "enabled": False})
                 self.assertFalse(disabled["sources"][0]["enabled"])
+                source.stop.assert_called_once_with()
             contents = json.loads((Path(folder) / "hooks.json").read_text(encoding="utf-8"))
             self.assertEqual(contents["hooks"], {})
 
@@ -190,6 +335,7 @@ class EventPipelineTests(unittest.TestCase):
                 "payload": {"type": "custom_tool_call_output", "call_id": "approval-call", "output": [{"type": "input_text", "text": "Approval denied"}]},
             })
             self.assertEqual(store.latest_records()[0]["state"], "failure")
+
             source._consume("thread", {
                 "type": "response_item",
                 "payload": {"type": "custom_tool_call", "call_id": "failed-call", "input": "{}"},

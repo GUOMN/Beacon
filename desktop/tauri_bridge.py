@@ -14,6 +14,7 @@ from codex_status_core.event_store import StatusEventStore
 from codex_status_core.event_store import app_data_directory
 from codex_status_core.event_store import EventIngestServer
 from codex_status_core.codex_session_source import CodexSessionSource
+from codex_status_core.custom_source import CustomSourceRegistry, CustomSourceSupervisor
 from codex_status_core.hook_manager import install as install_hook
 from codex_status_core.hook_manager import providers as hook_providers
 from codex_status_core.hook_manager import status as hook_status
@@ -29,6 +30,23 @@ DEFAULT_STYLES = {
 }
 DEFAULT_BUSY_WEIGHTS = {"task": 30, "token": 20, "cpu": 20, "memory": 10, "disk": 10, "network": 10}
 _preview_payload: dict[str, object] | None = None
+_custom_registry = CustomSourceRegistry()
+_custom_supervisor: CustomSourceSupervisor | None = None
+_runtime_store: StatusEventStore | None = None
+_codex_source: CodexSessionSource | None = None
+
+
+def _sync_codex_source(enabled: bool) -> None:
+    """Keep the local Codex JSONL reader aligned with the Codex source switch."""
+    global _codex_source
+    if _runtime_store is None:
+        return
+    if enabled and _codex_source is None:
+        _codex_source = CodexSessionSource(_runtime_store, lambda _message: None)
+        _codex_source.start()
+    elif not enabled and _codex_source is not None:
+        _codex_source.stop()
+        _codex_source = None
 
 
 def _weighted_busy(values: tuple[float, ...], weights: tuple[float, ...]) -> int:
@@ -145,7 +163,7 @@ def data_sources(_payload: dict[str, object] | None = None) -> dict[str, object]
                 "status": current,
                 "enabled": current == "已启用",
                 "manageable": provider.supported,
-                "note": "内置 JSONL 采集持续运行；此开关仅管理 Beacon 的官方 Hook 订阅",
+                "note": "同时控制 Beacon 的官方 Hook 与本机 Codex JSONL 监听",
             })
             continue
         current = hook_status(provider)
@@ -157,11 +175,33 @@ def data_sources(_payload: dict[str, object] | None = None) -> dict[str, object]
             "manageable": provider.supported,
             "note": provider.note or "通过官方 Hook 将任务状态写入本机 Beacon",
         })
+    for source in _custom_registry.list():
+        source_id = str(source.get("id") or "")
+        enabled = bool(source.get("enabled"))
+        if _custom_supervisor is not None:
+            current = _custom_supervisor.status(source_id)
+        else:
+            current = "已启用，等待客户端启动" if enabled else "已停用"
+        result.append({
+            "key": f"custom:{source_id}",
+            "kind": "custom",
+            "name": str(source.get("name") or "自定义本地订阅"),
+            "status": current,
+            "enabled": enabled,
+            "manageable": True,
+            "note": "本机适配器 · 私有协议和原始消息不会写入 Beacon",
+            "config": source,
+        })
     return {"sources": result}
 
 
 def set_data_source(payload: dict[str, object]) -> dict[str, object]:
     key = str(payload.get("key") or "")
+    if key.startswith("custom:"):
+        _custom_registry.set_enabled(key.removeprefix("custom:"), bool(payload.get("enabled")))
+        if _custom_supervisor is not None:
+            _custom_supervisor.reload()
+        return data_sources()
     selected = next((provider for provider in hook_providers() if provider.key == key), None)
     if selected is None:
         raise ValueError("未知的数据源")
@@ -169,6 +209,27 @@ def set_data_source(payload: dict[str, object]) -> dict[str, object]:
         install_hook(selected)
     else:
         uninstall_hook(selected)
+    if selected.key == "codex":
+        _sync_codex_source(bool(payload.get("enabled")))
+    return data_sources()
+
+
+def save_custom_source(payload: dict[str, object]) -> dict[str, object]:
+    """Save generic endpoint/adapter metadata outside the repository."""
+    raw = payload.get("config", payload)
+    if not isinstance(raw, dict):
+        raise ValueError("自定义数据源配置无效")
+    _custom_registry.save(raw)
+    if _custom_supervisor is not None:
+        _custom_supervisor.reload()
+    return data_sources()
+
+
+def delete_custom_source(payload: dict[str, object]) -> dict[str, object]:
+    source_id = str(payload.get("id") or "")
+    _custom_registry.delete(source_id)
+    if _custom_supervisor is not None:
+        _custom_supervisor.reload()
     return data_sources()
 
 
@@ -261,15 +322,21 @@ def main() -> int:
         "manage-tasks": manage_tasks,
         "data-sources": data_sources,
         "set-data-source": set_data_source,
+        "save-custom-source": save_custom_source,
+        "delete-custom-source": delete_custom_source,
         "apply-device": apply_device,
     }
     if command == "serve":
+        global _custom_supervisor, _runtime_store
         store = StatusEventStore()
+        _runtime_store = store
         store.fail_interrupted_tasks()
         event_server = EventIngestServer(store)
         event_server.start()
-        codex_source = CodexSessionSource(store, lambda _message: None)
-        codex_source.start()
+        codex_provider = next((provider for provider in hook_providers() if provider.key == "codex"), None)
+        _sync_codex_source(codex_provider is not None and hook_status(codex_provider) == "已启用")
+        _custom_supervisor = CustomSourceSupervisor(store, _custom_registry)
+        _custom_supervisor.start()
         try:
             for line in sys.stdin:
                 try:
@@ -282,7 +349,10 @@ def main() -> int:
                     response = {"error": str(exc)}
                 print(json.dumps(response, ensure_ascii=False), flush=True)
         finally:
-            codex_source.stop()
+            _custom_supervisor.stop()
+            _custom_supervisor = None
+            _sync_codex_source(False)
+            _runtime_store = None
             event_server.stop()
         return 0
     try:

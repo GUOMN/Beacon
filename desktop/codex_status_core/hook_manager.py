@@ -76,12 +76,23 @@ def install(provider: HookProvider) -> None:
         entries = hooks.setdefault(event_name, [])
         # Claude/Gemini 的命令 Hook 使用嵌套 hooks；Cursor/Copilot 使用直接命令项。
         if provider.key in {"claude", "gemini", "codex"}:
-            if any(MARKER in json.dumps(item) for item in entries):
+            existing = next((item for item in entries if MARKER in json.dumps(item)), None)
+            if existing is not None:
+                # Permission hooks may stay open while the user decides.  Codex
+                # otherwise treats the default short hook timeout as a failed
+                # request, so repair installations made by earlier versions.
+                if provider.key == "codex" and event_name == "PermissionRequest":
+                    for hook in existing.get("hooks", []):
+                        if isinstance(hook, dict) and MARKER in str(hook.get("command", "")):
+                            hook["timeout"] = 86_400
                 continue
             hook = {"type": "command", "command": command}
             if provider.key == "claude":
                 hook["async"] = True
-            entries.append({"hooks": [hook]})
+            entry = {"hooks": [hook]}
+            if provider.key == "codex" and event_name == "PermissionRequest":
+                hook["timeout"] = 86_400
+            entries.append(entry)
         else:
             if any(MARKER in json.dumps(item) for item in entries):
                 continue

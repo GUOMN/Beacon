@@ -11,6 +11,11 @@ metrics, and task-to-light state calculation.
 - `codex_status_core/`: SQLite event store, task models, protocol encoding, and Hook ingestion.
 - `tests/`: protocol and event-pipeline tests.
 
+Custom local tools can be connected through an external protocol adapter. See
+[`CUSTOM_DATA_SOURCES.md`](CUSTOM_DATA_SOURCES.md) for the provider-neutral
+adapter boundary. Private socket and protocol details remain in per-user local
+configuration and must not be committed.
+
 Bluetooth permission, scanning, persistent connection, reconnect, GATT writes,
 identification, and OTA are owned by the shared Tauri/Rust process on both
 Windows and macOS. The Python service never opens a Bluetooth connection.

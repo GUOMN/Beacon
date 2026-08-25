@@ -18,6 +18,23 @@ EVENT_STATES = {
 }
 
 
+def _hook_payload_failed(value: Any) -> bool:
+    """Return whether a hook completion reports a tool error without persisting its text."""
+    if isinstance(value, dict):
+        if value.get("success") is False or value.get("is_error") is True or value.get("isError") is True:
+            return True
+        status = value.get("status")
+        if isinstance(status, str) and status.lower() in {"error", "failed", "failure", "denied", "rejected", "cancelled", "canceled"}:
+            return True
+        return any(_hook_payload_failed(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_hook_payload_failed(item) for item in value)
+    if isinstance(value, str):
+        lowered = value.lower()
+        return any(token in lowered for token in ("approval denied", "rejected", "permission denied", "tool failed", "execution failed"))
+    return False
+
+
 def _read_payload() -> dict[str, Any]:
     """Hook 的标准输入可能包含用户正文；这里只提取会话标识，不落盘正文。"""
     try:
@@ -56,6 +73,8 @@ def report_hook(provider: str, event_name: str, endpoint: str = "http://127.0.0.
     """尽力上报并永远成功退出，不能阻断宿主工具的任务。"""
     payload = _read_payload()
     state = EVENT_STATES.get(provider, {}).get(event_name)
+    if provider == "codex" and event_name == "PostToolUse" and _hook_payload_failed(payload):
+        state = "failure"
     if not state:
         return 0
     event = {
