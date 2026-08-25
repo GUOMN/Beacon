@@ -6,6 +6,7 @@
   "bundle": {
     "macOS": {
       "minimumSystemVersion": "14.0",
+      "signingIdentity": "-",
       "entitlements": "Beacon.entitlements",
       "files": {
         "PlugIns/BeaconQuickActions.appex": "widget/build/Release/BeaconQuickActions.appex"
