@@ -27,6 +27,23 @@ use tokio::sync::Mutex as AsyncMutex;
 #[cfg(not(target_os = "macos"))]
 use uuid::Uuid;
 
+#[cfg(target_os = "macos")]
+use tauri_nspanel::{
+    tauri_panel, CollectionBehavior, ManagerExt as _, PanelLevel, StyleMask,
+    WebviewWindowExt as _,
+};
+
+#[cfg(target_os = "macos")]
+tauri_panel! {
+    panel!(TrayPopupPanel {
+        config: {
+            can_become_key_window: true,
+            can_become_main_window: false,
+            is_floating_panel: true
+        }
+    })
+}
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -1457,20 +1474,20 @@ fn nearest_monitor(app: &tauri::AppHandle, x: f64, y: f64) -> Option<Monitor> {
 
 #[cfg(target_os = "macos")]
 fn configure_macos_tray_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
-    use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior, NSPopUpMenuWindowLevel};
-
-    let pointer = window.ns_window()?.cast::<NSWindow>();
-    unsafe {
-        let window = &*pointer;
-        let behavior = window.collectionBehavior()
-            | NSWindowCollectionBehavior::CanJoinAllSpaces
-            | NSWindowCollectionBehavior::CanJoinAllApplications
-            | NSWindowCollectionBehavior::FullScreenAuxiliary
-            | NSWindowCollectionBehavior::Transient;
-        window.setCollectionBehavior(behavior);
-        window.setHidesOnDeactivate(false);
-        window.setLevel(NSPopUpMenuWindowLevel);
-    }
+    let panel = window.to_panel::<TrayPopupPanel>()?;
+    debug_assert!(panel.can_become_key_window());
+    debug_assert!(panel.is_floating_panel());
+    panel.set_level(PanelLevel::PopUpMenu.value());
+    panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
+    panel.set_collection_behavior(
+        CollectionBehavior::new()
+            .can_join_all_spaces()
+            .full_screen_auxiliary()
+            .transient()
+            .ignores_cycle()
+            .into(),
+    );
+    panel.set_hides_on_deactivate(false);
     Ok(())
 }
 
@@ -1501,44 +1518,12 @@ fn configure_macos_tray_icon<R: tauri::Runtime>(
 }
 
 #[cfg(target_os = "macos")]
-fn present_macos_tray_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSWindow, NSPopUpMenuWindowLevel};
-
-    let Some(main_thread) = MainThreadMarker::new() else {
-        return Ok(());
-    };
-    let pointer = window.ns_window()?.cast::<NSWindow>();
-    unsafe {
-        let native_window = &*pointer;
-        let application = NSApplication::sharedApplication(main_thread);
-        native_window.setLevel(NSPopUpMenuWindowLevel);
-        // Put the all-Spaces window onto the currently visible Space before
-        // activating Beacon. Activating first assigns it to Beacon's desktop.
-        native_window.orderFrontRegardless();
-        #[allow(deprecated)]
-        application.activateIgnoringOtherApps(true);
-        native_window.makeKeyAndOrderFront(None);
-    }
+fn present_macos_tray_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let panel = app
+        .get_webview_panel("tray-popup")
+        .map_err(|_| tauri::Error::WindowNotFound)?;
+    panel.show_and_make_key();
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn keep_macos_tray_window_in_front(window: tauri::WebviewWindow) {
-    tauri::async_runtime::spawn(async move {
-        for delay_ms in [120, 350] {
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            if !window.is_visible().unwrap_or(false) {
-                break;
-            }
-            let raised_window = window.clone();
-            let _ = window.run_on_main_thread(move || {
-                if raised_window.is_visible().unwrap_or(false) {
-                    let _ = present_macos_tray_window(&raised_window);
-                }
-            });
-        }
-    });
 }
 
 fn toggle_tray_window(app: &tauri::AppHandle, click_x: f64, click_y: f64) {
@@ -1628,18 +1613,18 @@ fn toggle_tray_window(app: &tauri::AppHandle, click_x: f64, click_y: f64) {
     #[cfg(not(target_os = "macos"))]
     let _ = window.show();
     #[cfg(target_os = "macos")]
-    let _ = present_macos_tray_window(&window);
-    #[cfg(target_os = "macos")]
-    {
-        keep_macos_tray_window_in_front(window.clone());
-    }
+    let _ = present_macos_tray_window(app);
     #[cfg(not(target_os = "macos"))]
     let _ = window.set_focus();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+
+    builder
         .manage(BridgeState(Arc::new(Mutex::new(None))))
         .manage(NativeBleState::new())
         .setup(|app| {
