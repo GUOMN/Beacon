@@ -144,19 +144,33 @@ fn bundled_bridge() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_ble_library() -> Result<PathBuf, String> {
-    let development =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries/libbeacon_macos_ble.dylib");
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+fn macos_ble_library_candidates(
+    executable: &std::path::Path,
+    manifest_dir: &std::path::Path,
+    include_development: bool,
+) -> Vec<PathBuf> {
     let bundled = executable
         .parent()
         .and_then(|path| path.parent())
         .map(|path| path.join("Resources/binaries/libbeacon_macos_ble.dylib"));
-    development
-        .is_file()
-        .then_some(development)
-        .or_else(|| bundled.filter(|path| path.is_file()))
-        .ok_or_else(|| "找不到 macOS 原生蓝牙模块，请重新安装客户端".to_string())
+    let development = manifest_dir.join("binaries/libbeacon_macos_ble.dylib");
+    bundled
+        .into_iter()
+        .chain(include_development.then_some(development))
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_ble_library() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    macos_ble_library_candidates(
+        &executable,
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        cfg!(debug_assertions),
+    )
+    .into_iter()
+    .find(|path| path.is_file())
+    .ok_or_else(|| "找不到 macOS 原生蓝牙模块，请重新安装客户端".to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -1330,6 +1344,22 @@ async fn bridge_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn release_macos_ble_candidates_only_use_the_app_bundle() {
+        let candidates = macos_ble_library_candidates(
+            std::path::Path::new("/Applications/Beacon.app/Contents/MacOS/Beacon"),
+            std::path::Path::new("/source/desktop/tauri_app/src-tauri"),
+            false,
+        );
+        assert_eq!(
+            candidates,
+            vec![PathBuf::from(
+                "/Applications/Beacon.app/Contents/Resources/binaries/libbeacon_macos_ble.dylib"
+            )]
+        );
+    }
 
     #[test]
     fn embedded_portable_bridge_contains_required_sources() {
