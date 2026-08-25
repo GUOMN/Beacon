@@ -16,6 +16,10 @@ desktop/dist/
 desktop/tauri_app/node_modules/
 desktop/tauri_app/dist/
 desktop/tauri_app/src-tauri/target/
+desktop/tauri_app/src-tauri/widget/DerivedData/
+desktop/tauri_app/src-tauri/widget/build/
+desktop/tauri_app/src-tauri/widget/**/DerivedData/
+desktop/tauri_app/src-tauri/widget/**/build/
 desktop/tauri_app/tsconfig.tsbuildinfo
 .pnpm-store/
 *.spec

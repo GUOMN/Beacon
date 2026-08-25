@@ -105,7 +105,7 @@ def settings() -> dict[str, object]:
         data = {}
     styles = {key: {**value, **data.get("state_styles", {}).get(key, {})} for key, value in DEFAULT_STYLES.items()}
     weights = {key: max(0, min(100, int(data.get("busy_weights", {}).get(key, value)))) for key, value in DEFAULT_BUSY_WEIGHTS.items()}
-    return {"bound_device_id": data.get("bound_device_id"), "brightness": int(data.get("master_brightness", 30)), "sleep_minutes": int(data.get("sleep_timeout_minutes", 10)), "led_count": int(data.get("total_led_count", 6)), "output_channels": int(data.get("output_channels", 1)), "styles": styles, "busy_weights": weights, "system_color_source": str(data.get("system_color_source", "账号余量")), "system_effect": int(data.get("system_effect", 4))}
+    return {"bound_device_id": data.get("bound_device_id"), "brightness": int(data.get("master_brightness", 30)), "system_brightness": int(data.get("system_brightness", 100)), "sleep_minutes": int(data.get("sleep_timeout_minutes", 10)), "led_count": int(data.get("total_led_count", 6)), "output_channels": int(data.get("output_channels", 1)), "styles": styles, "busy_weights": weights, "system_color_source": str(data.get("system_color_source", "账号余量")), "system_effect": int(data.get("system_effect", 4))}
 
 
 def save_settings(payload: dict[str, object]) -> dict[str, object]:
@@ -114,7 +114,7 @@ def save_settings(payload: dict[str, object]) -> dict[str, object]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         data = {}
-    for key in ("bound_device_id", "master_brightness", "sleep_timeout_minutes", "total_led_count", "output_channels", "state_styles", "busy_weights", "system_color_source", "system_effect"):
+    for key in ("bound_device_id", "master_brightness", "system_brightness", "sleep_timeout_minutes", "total_led_count", "output_channels", "state_styles", "busy_weights", "system_color_source", "system_effect"):
         if key in payload:
             data[key] = payload[key]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -276,7 +276,7 @@ def apply_device(payload: dict[str, object]) -> dict[str, object]:
             task.animation_period_ms = state_styles[task.state].period_ms
     remaining = int(payload.get("remaining_percent", 75)) if payload.get("preview") else availability.get(str(current["system_color_source"]), 100)
     busy = int(payload.get("busy_percent", calculated_busy)) if payload.get("preview") else calculated_busy
-    snapshot = DashboardSnapshot(remaining_percent=max(0, min(100, remaining)), period_used_percent=max(0, min(100, busy)), master_brightness_percent=max(0, min(100, int(current["brightness"]))), sleep_timeout_minutes=max(1, min(1440, int(current["sleep_minutes"]))), output_channels=int(current["output_channels"]), system_effect=max(1, min(4, int(current["system_effect"]))), state_styles=state_styles, tasks=tasks)
+    snapshot = DashboardSnapshot(remaining_percent=max(0, min(100, remaining)), period_used_percent=max(0, min(100, busy)), master_brightness_percent=max(0, min(100, int(current["brightness"]))), system_brightness_percent=max(0, min(100, int(current["system_brightness"]))), sleep_timeout_minutes=max(1, min(1440, int(current["sleep_minutes"]))), output_channels=int(current["output_channels"]), system_effect=max(1, min(4, int(current["system_effect"]))), state_styles=state_styles, tasks=tasks)
     if payload.get("_native_transport"):
         from codex_status_core.protocol import BLEProtocol
         sequence = 0
@@ -289,6 +289,7 @@ def apply_device(payload: dict[str, object]) -> dict[str, object]:
         add(lambda seq: BLEProtocol.encode_sleep_timeout(seq, snapshot.sleep_timeout_minutes))
         add(lambda seq: BLEProtocol.encode_channel_count(seq, snapshot.output_channels))
         add(lambda seq: BLEProtocol.encode_system_effect(seq, snapshot.system_effect))
+        add(lambda seq: BLEProtocol.encode_system_brightness(seq, snapshot.system_brightness_percent))
         for state, style in snapshot.state_styles.items():
             add(lambda seq, state=state, style=style: BLEProtocol.encode_state_style(
                 seq, int(state), style.color, style.effect, style.period_ms, style.blink_duty_percent

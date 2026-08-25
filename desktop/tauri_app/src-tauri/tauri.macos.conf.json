@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "./src-tauri/scripts/build-macos-widget.sh && node node_modules/typescript/bin/tsc && node node_modules/vite/bin/vite.js build"
+  },
+  "bundle": {
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "entitlements": "Beacon.entitlements",
+      "files": {
+        "PlugIns/BeaconQuickActions.appex": "widget/build/Release/BeaconQuickActions.appex"
+      }
+    }
+  }
+}

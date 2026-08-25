@@ -8,6 +8,7 @@
 static bool s_state_style_valid[PANEL_STATE_ERROR + 1U];
 static led_status_t s_state_styles[PANEL_STATE_ERROR + 1U];
 static led_effect_t s_system_effect = LED_EFFECT_DOUBLE_BLINK;
+static uint8_t s_system_brightness_percent = 100U;
 
 // 上位机不覆盖动画参数时采用的固件默认值。
 #define DEFAULT_TASK_ANIMATION_PERIOD_MS 1200U
@@ -42,6 +43,11 @@ esp_err_t dashboard_status_load_saved_styles(void)
         saved_system_effect >= LED_EFFECT_SOLID &&
         saved_system_effect <= LED_EFFECT_DOUBLE_BLINK) {
         s_system_effect = (led_effect_t)saved_system_effect;
+    }
+    uint8_t saved_system_brightness = 0U;
+    if (nvs_get_u8(handle, "system_br", &saved_system_brightness) == ESP_OK &&
+        saved_system_brightness <= 100U) {
+        s_system_brightness_percent = saved_system_brightness;
     }
 
     for (panel_state_t state = PANEL_STATE_RUNNING; state <= PANEL_STATE_ERROR; ++state) {
@@ -258,7 +264,7 @@ esp_err_t dashboard_status_set_usage(uint8_t remaining_percent,
         .red = red,
         .green = green,
         .blue = 0,
-        .brightness = 210,
+        .brightness = (uint8_t)(210U * s_system_brightness_percent / 100U),
         // 系统灯默认短亮两次再停顿，与任务灯的单闪和呼吸明确区分。
         .effect = s_system_effect,
         .period_ms = period_ms,
@@ -280,6 +286,24 @@ esp_err_t dashboard_status_set_system_effect(led_effect_t effect)
     nvs_close(handle);
     if (result == ESP_OK) {
         s_system_effect = effect;
+    }
+    return result;
+}
+
+esp_err_t dashboard_status_set_system_brightness(uint8_t brightness_percent)
+{
+    ESP_RETURN_ON_FALSE(brightness_percent <= 100U, ESP_ERR_INVALID_ARG, "dashboard",
+                        "系统灯亮度无效");
+    nvs_handle_t handle;
+    ESP_RETURN_ON_ERROR(nvs_open("status_panel", NVS_READWRITE, &handle), "dashboard",
+                        "打开系统灯亮度存储失败");
+    esp_err_t result = nvs_set_u8(handle, "system_br", brightness_percent);
+    if (result == ESP_OK) {
+        result = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (result == ESP_OK) {
+        s_system_brightness_percent = brightness_percent;
     }
     return result;
 }

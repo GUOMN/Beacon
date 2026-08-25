@@ -243,7 +243,7 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
     private func finishScan() {
         central.stopScan(); scanToken = nil
         let completion = scanCompletion; scanCompletion = nil
-        let devices = candidates.compactMap { id -> [String: Any]? in
+        var devices = candidates.compactMap { id -> [String: Any]? in
             guard let name = names[id], let deviceID = deviceID(from: name) else { return nil }
             return [
                 "name": name, "device_id": deviceID, "address": id.uuidString,
@@ -251,6 +251,19 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
                 "connected": peripherals[id]?.state == .connected,
             ]
         }.sorted { ($0["rssi"] as? Int ?? Int.min) > ($1["rssi"] as? Int ?? Int.min) }
+        // Connected boards often stop advertising, so they are absent from candidates.
+        // Keep the active board visible in Device Manager after a rescan.
+        if let peripheral = currentPeripheral(), peripheral.state == .connected,
+           let deviceID = connectedDeviceID ?? deviceID(from: names[peripheral.identifier]),
+           !devices.contains(where: { ($0["device_id"] as? String)?.caseInsensitiveCompare(deviceID) == .orderedSame }) {
+            devices.insert([
+                "name": names[peripheral.identifier] ?? "\(beaconPrefix)\(deviceID)",
+                "device_id": deviceID,
+                "address": peripheral.identifier.uuidString,
+                "rssi": signalStrength[peripheral.identifier] ?? NSNull(),
+                "connected": true,
+            ], at: 0)
+        }
         completion?([
             "backend": "CoreBluetooth", "state": stateName(central.state), "devices": devices,
             "observed_count": observed.count, "candidate_count": candidates.count,

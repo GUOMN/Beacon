@@ -66,6 +66,7 @@ class DashboardSnapshot:
     remaining_percent: int = 100
     period_used_percent: int = 0
     master_brightness_percent: int = 60
+    system_brightness_percent: int = 100
     sleep_timeout_minutes: int = 10
     output_channels: int = 1
     system_effect: int = 4
@@ -81,6 +82,8 @@ class DashboardSnapshot:
             raise ValueError("周期用量必须在 0~100 之间")
         if not 0 <= self.master_brightness_percent <= 100:
             raise ValueError("整体亮度必须在 0~100 之间")
+        if not 0 <= self.system_brightness_percent <= 100:
+            raise ValueError("系统灯亮度必须在 0~100 之间")
         if not 1 <= self.sleep_timeout_minutes <= 1440:
             raise ValueError("断连休眠时间必须在 1~1440 分钟之间")
         if self.output_channels not in (1, 2):

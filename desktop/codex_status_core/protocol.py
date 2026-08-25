@@ -84,6 +84,13 @@ class BLEProtocol:
         if not 1 <= effect <= 4:
             raise ValueError("系统灯效必须是常亮、闪烁、呼吸或双闪")
         return bytes((0xC3, 1, 11, sequence & 0xFF, effect))
+
+    @classmethod
+    def encode_system_brightness(cls, sequence: int, brightness_percent: int) -> bytes:
+        """设置第一颗系统灯的独立亮度；仍会受整体亮度限制。"""
+        if not 0 <= brightness_percent <= 100:
+            raise ValueError("系统灯亮度必须在 0~100 之间")
+        return bytes((0xC3, 1, 12, sequence & 0xFF, brightness_percent))
     SERVICE_UUID = "0100c310-7625-819e-934c-32b8e4177d6a"
     CONTROL_UUID = "0200c310-7625-819e-934c-32b8e4177d6a"
     OTA_UUID = "0300c310-7625-819e-934c-32b8e4177d6a"

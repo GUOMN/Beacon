@@ -9,17 +9,19 @@ use btleplug::platform::{
 };
 use serde_json::Value;
 use std::{
+    fs,
     io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc, Mutex,
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, WindowEvent};
+use tauri::{Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tokio::sync::Mutex as AsyncMutex;
 #[cfg(not(target_os = "macos"))]
 use uuid::Uuid;
@@ -658,6 +660,170 @@ async fn run_bridge_async(
         .map_err(|error| format!("后台任务异常：{error}"))?
 }
 
+#[cfg(target_os = "macos")]
+const WIDGET_APP_GROUP: &str = "group.com.codexstatus.bridge";
+#[cfg(target_os = "macos")]
+static WIDGET_WRITE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(target_os = "macos")]
+fn widget_group_directory() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").ok_or_else(|| "无法定位用户目录".to_string())?;
+    let directory = PathBuf::from(home)
+        .join("Library/Group Containers")
+        .join(WIDGET_APP_GROUP);
+    fs::create_dir_all(&directory).map_err(|error| format!("创建小组件共享目录失败：{error}"))?;
+    Ok(directory)
+}
+
+#[cfg(target_os = "macos")]
+fn write_widget_json(name: &str, value: &Value) -> Result<(), String> {
+    let directory = widget_group_directory()?;
+    let path = directory.join(name);
+    let sequence = WIDGET_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = directory.join(format!(".{name}.{}.{}.tmp", std::process::id(), sequence));
+    let contents = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    fs::write(&temporary, contents).map_err(|error| format!("写入小组件数据失败：{error}"))?;
+    fs::rename(&temporary, &path).map_err(|error| format!("更新小组件数据失败：{error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn widget_context() -> Value {
+    let path = widget_group_directory()
+        .map(|directory| directory.join("context.json"))
+        .ok();
+    path.and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_else(|| serde_json::json!({"theme":"default"}))
+}
+
+#[cfg(target_os = "macos")]
+fn write_widget_snapshot(mut dashboard: Value, settings: &Value) -> Result<(), String> {
+    let context = widget_context();
+    let object = dashboard
+        .as_object_mut()
+        .ok_or_else(|| "任务快照格式无效".to_string())?;
+    let updated_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let led_count = settings
+        .get("led_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(6);
+    object.insert("schema_version".into(), Value::from(1));
+    object.insert("updated_at_ms".into(), Value::from(updated_at_ms));
+    object.insert(
+        "slot_count".into(),
+        Value::from(led_count.saturating_sub(1).max(1)),
+    );
+    object.insert(
+        "theme".into(),
+        context
+            .get("theme")
+            .cloned()
+            .unwrap_or_else(|| Value::from("default")),
+    );
+    write_widget_json("dashboard.json", &dashboard)
+}
+
+#[cfg(target_os = "macos")]
+fn pending_widget_commands() -> Result<Vec<PathBuf>, String> {
+    let directory = widget_group_directory()?.join("Commands");
+    fs::create_dir_all(&directory).map_err(|error| format!("创建小组件命令目录失败：{error}"))?;
+    let mut commands = fs::read_dir(directory)
+        .map_err(|error| format!("读取小组件命令失败：{error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    commands.sort();
+    Ok(commands)
+}
+
+#[cfg(target_os = "macos")]
+fn process_widget_commands(bridge: &BridgeState) -> Result<bool, String> {
+    let mut changed = false;
+    for path in pending_widget_commands()? {
+        let result = (|| {
+            let contents = fs::read_to_string(&path)
+                .map_err(|error| format!("读取快捷操作失败：{error}"))?;
+            let command: Value = serde_json::from_str(&contents)
+                .map_err(|error| format!("快捷操作格式无效：{error}"))?;
+            let payload = command
+                .get("payload")
+                .cloned()
+                .ok_or_else(|| "快捷操作缺少 payload".to_string())?;
+            let operation = payload
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !matches!(operation, "pin" | "delete" | "delete-completed" | "reorder") {
+                return Err("快捷操作类型不受支持".to_string());
+            }
+            run_persistent_bridge(bridge, "manage-tasks", &payload)?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(&path);
+        match result {
+            Ok(()) => changed = true,
+            Err(error) => {
+                let _ = write_widget_json(
+                    "last-error.json",
+                    &serde_json::json!({"message":error,"occurred_at_ms":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64}),
+                );
+            }
+        }
+    }
+    Ok(changed)
+}
+
+#[cfg(target_os = "macos")]
+fn start_widget_sync(bridge: BridgeState, ble: NativeBleState) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let bridge_for_work = bridge.clone();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                let changed = process_widget_commands(&bridge_for_work)?;
+                let dashboard = run_persistent_bridge(
+                    &bridge_for_work,
+                    "dashboard",
+                    &serde_json::json!({}),
+                )?;
+                let settings = run_persistent_bridge(
+                    &bridge_for_work,
+                    "settings",
+                    &serde_json::json!({}),
+                )?;
+                write_widget_snapshot(dashboard, &settings)?;
+                Ok::<bool, String>(changed)
+            })
+            .await;
+            if matches!(result, Ok(Ok(true))) {
+                *ble.last_dashboard.lock().await = None;
+                let _ = native_apply(bridge.clone(), ble.clone(), serde_json::json!({}), false).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
+}
+
+#[tauri::command]
+fn sync_widget_context(theme: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let theme = match theme.as_str() {
+            "mecha" | "aldnoah" => theme,
+            _ => "default".to_string(),
+        };
+        return write_widget_json("context.json", &serde_json::json!({"theme":theme}));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = theme;
+        Ok(())
+    }
+}
+
 #[tauri::command]
 async fn get_dashboard(
     bridge: tauri::State<'_, BridgeState>,
@@ -1191,27 +1357,327 @@ mod tests {
     }
 }
 
+const TRAY_WINDOW_WIDTH: f64 = 480.0;
+const TRAY_WINDOW_HEIGHT: f64 = 520.0;
+static TRAY_FOCUS_GUARD_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+static TRAY_WINDOW_GAINED_FOCUS: AtomicBool = AtomicBool::new(false);
+static TRAY_OPEN_ANIMATION_ID: AtomicU64 = AtomicU64::new(0);
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn animate_tray_window_open(
+    window: tauri::WebviewWindow,
+    animation_id: u64,
+    start_position: PhysicalPosition<i32>,
+    start_size: PhysicalSize<u32>,
+    target_position: PhysicalPosition<i32>,
+    target_size: PhysicalSize<u32>,
+) {
+    tauri::async_runtime::spawn(async move {
+        const STEPS: u32 = 12;
+        for step in 1..=STEPS {
+            tokio::time::sleep(std::time::Duration::from_millis(18)).await;
+            if TRAY_OPEN_ANIMATION_ID.load(Ordering::Relaxed) != animation_id
+                || !window.is_visible().unwrap_or(false)
+            {
+                break;
+            }
+            let progress = step as f64 / STEPS as f64;
+            let eased = 1.0 - (1.0 - progress).powi(3);
+            let interpolate = |start: i32, target: i32| {
+                (start as f64 + (target - start) as f64 * eased).round() as i32
+            };
+            let width = interpolate(start_size.width as i32, target_size.width as i32).max(1) as u32;
+            let height = interpolate(start_size.height as i32, target_size.height as i32).max(1) as u32;
+            let _ = window.set_size(PhysicalSize::new(width, height));
+            let _ = window.set_position(PhysicalPosition::new(
+                interpolate(start_position.x, target_position.x),
+                interpolate(start_position.y, target_position.y),
+            ));
+        }
+    });
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(tray_window) = app.get_webview_window("tray-popup") {
+        let _ = tray_window.hide();
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+#[tauri::command]
+fn open_main_window(app: tauri::AppHandle) {
+    show_main_window(&app);
+}
+
+fn distance_to_monitor(monitor: &Monitor, x: f64, y: f64) -> f64 {
+    let position = monitor.position();
+    let size = monitor.size();
+    let left = position.x as f64;
+    let top = position.y as f64;
+    let right = left + size.width as f64;
+    let bottom = top + size.height as f64;
+    let dx = if x < left {
+        left - x
+    } else if x > right {
+        x - right
+    } else {
+        0.0
+    };
+    let dy = if y < top {
+        top - y
+    } else if y > bottom {
+        y - bottom
+    } else {
+        0.0
+    };
+    dx * dx + dy * dy
+}
+
+fn nearest_monitor(app: &tauri::AppHandle, x: f64, y: f64) -> Option<Monitor> {
+    app.available_monitors().ok()?.into_iter().min_by(|left, right| {
+        distance_to_monitor(left, x, y).total_cmp(&distance_to_monitor(right, x, y))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_tray_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior, NSPopUpMenuWindowLevel};
+
+    let pointer = window.ns_window()?.cast::<NSWindow>();
+    unsafe {
+        let window = &*pointer;
+        let behavior = window.collectionBehavior()
+            | NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::CanJoinAllApplications
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::Transient;
+        window.setCollectionBehavior(behavior);
+        window.setHidesOnDeactivate(false);
+        window.setLevel(NSPopUpMenuWindowLevel);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_tray_icon<R: tauri::Runtime>(
+    tray: &tauri::tray::TrayIcon<R>,
+) -> tauri::Result<()> {
+    use objc2::MainThreadMarker;
+
+    tray.with_inner_tray_icon(|inner| {
+        let Some(main_thread) = MainThreadMarker::new() else {
+            return;
+        };
+        let Some(status_item) = inner.ns_status_item() else {
+            return;
+        };
+        let Some(button) = status_item.button(main_thread) else {
+            return;
+        };
+        let Some(image) = button.image() else {
+            return;
+        };
+        let mut size = image.size();
+        size.width = 21.0;
+        size.height = 21.0;
+        image.setSize(size);
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn present_macos_tray_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSWindow, NSPopUpMenuWindowLevel};
+
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return Ok(());
+    };
+    let pointer = window.ns_window()?.cast::<NSWindow>();
+    unsafe {
+        let native_window = &*pointer;
+        let application = NSApplication::sharedApplication(main_thread);
+        #[allow(deprecated)]
+        application.activateIgnoringOtherApps(true);
+        native_window.setLevel(NSPopUpMenuWindowLevel);
+        native_window.orderFrontRegardless();
+        native_window.makeKeyAndOrderFront(None);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn keep_macos_tray_window_in_front(window: tauri::WebviewWindow) {
+    tauri::async_runtime::spawn(async move {
+        for delay_ms in [120, 350] {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            if !window.is_visible().unwrap_or(false) {
+                break;
+            }
+            let raised_window = window.clone();
+            let _ = window.run_on_main_thread(move || {
+                if raised_window.is_visible().unwrap_or(false) {
+                    let _ = present_macos_tray_window(&raised_window);
+                }
+            });
+        }
+    });
+}
+
+fn toggle_tray_window(app: &tauri::AppHandle, click_x: f64, click_y: f64) {
+    let Some(window) = app.get_webview_window("tray-popup") else {
+        return;
+    };
+    if window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false) {
+        let _ = window.hide();
+        return;
+    }
+
+    let current_size = window.inner_size().ok();
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let target_size;
+    let target_position;
+    if let Some(monitor) = nearest_monitor(app, click_x, click_y) {
+        let scale = monitor.scale_factor();
+        let width = (TRAY_WINDOW_WIDTH * scale).round() as i32;
+        let height = (TRAY_WINDOW_HEIGHT * scale).round() as i32;
+        target_size = PhysicalSize::new(width as u32, height as u32);
+        let monitor_position = monitor.position();
+        let monitor_size = monitor.size();
+        let work = monitor.work_area();
+        let work_left = work.position.x;
+        let work_top = work.position.y;
+        let work_right = work_left + work.size.width as i32;
+        let work_bottom = work_top + work.size.height as i32;
+        let gap = (8.0 * scale).round() as i32;
+
+        let distances = [
+            click_y - monitor_position.y as f64,
+            monitor_position.x as f64 + monitor_size.width as f64 - click_x,
+            monitor_position.y as f64 + monitor_size.height as f64 - click_y,
+            click_x - monitor_position.x as f64,
+        ];
+        let edge = distances
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.total_cmp(right))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+
+        let centered_x = click_x.round() as i32 - width / 2;
+        let centered_y = click_y.round() as i32 - height / 2;
+        let (x, y) = match edge {
+            1 => (work_right - width - gap, centered_y),
+            2 => (centered_x, work_bottom - height - gap),
+            3 => (work_left + gap, centered_y),
+            _ => (centered_x, work_top + gap),
+        };
+        let max_x = (work_right - width - gap).max(work_left + gap);
+        let max_y = (work_bottom - height - gap).max(work_top + gap);
+        target_position = PhysicalPosition::new(
+            x.clamp(work_left + gap, max_x),
+            y.clamp(work_top + gap, max_y),
+        );
+    } else {
+        let width = current_size
+            .map(|size| size.width as i32)
+            .unwrap_or_else(|| (TRAY_WINDOW_WIDTH * scale).round() as i32);
+        let height = current_size
+            .map(|size| size.height as i32)
+            .unwrap_or_else(|| (TRAY_WINDOW_HEIGHT * scale).round() as i32);
+        target_size = PhysicalSize::new(width.max(1) as u32, height.max(1) as u32);
+        let gap = (8.0 * scale).round() as i32;
+        #[cfg(target_os = "macos")]
+        let y = click_y.round() as i32 + gap;
+        #[cfg(not(target_os = "macos"))]
+        let y = {
+            let height = current_size
+                .map(|size| size.height as i32)
+                .unwrap_or_else(|| (TRAY_WINDOW_HEIGHT * scale).round() as i32);
+            click_y.round() as i32 - height - gap
+        };
+        target_position = PhysicalPosition::new(
+            click_x.round() as i32 - width / 2,
+            y,
+        );
+    }
+    let start_size = PhysicalSize::new(
+        (58.0 * scale).round() as u32,
+        (30.0 * scale).round() as u32,
+    );
+    let start_position = PhysicalPosition::new(
+        target_position.x + (target_size.width as i32 - start_size.width as i32) / 2,
+        target_position.y,
+    );
+    let animation_id = TRAY_OPEN_ANIMATION_ID.fetch_add(1, Ordering::Relaxed) + 1;
+    let _ = window.set_size(start_size);
+    let _ = window.set_position(start_position);
+    TRAY_WINDOW_GAINED_FOCUS.store(false, Ordering::Relaxed);
+    TRAY_FOCUS_GUARD_UNTIL_MS.store(current_time_ms() + 1_200, Ordering::Relaxed);
+    let _ = window.show();
+    animate_tray_window_open(
+        window.clone(),
+        animation_id,
+        start_position,
+        start_size,
+        target_position,
+        target_size,
+    );
+    #[cfg(target_os = "macos")]
+    {
+        let _ = present_macos_tray_window(&window);
+        keep_macos_tray_window_in_front(window.clone());
+    }
+    let _ = window.set_focus();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(BridgeState(Arc::new(Mutex::new(None))))
         .manage(NativeBleState::new())
         .setup(|app| {
-            let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            let tray_window = WebviewWindowBuilder::new(
+                app,
+                "tray-popup",
+                WebviewUrl::App("index.html?view=tray".into()),
+            )
+            .title("Beacon · 任务与灯位")
+            .inner_size(TRAY_WINDOW_WIDTH, TRAY_WINDOW_HEIGHT)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .closable(false)
+            .decorations(false)
+            .always_on_top(true)
+            .visible_on_all_workspaces(true)
+            .skip_taskbar(true)
+            .shadow(true)
+            .visible(false)
+            .focused(false)
+            .build()?;
+            #[cfg(target_os = "macos")]
+            configure_macos_tray_window(&tray_window)?;
+
+            let show = MenuItem::with_id(app, "show", "打开主页面", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
-            TrayIconBuilder::new()
+            let tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("缺少应用图标").clone())
                 .tooltip("Beacon · 信标")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
+                    "show" => show_main_window(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -1219,20 +1685,37 @@ pub fn run() {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
+                        position,
                         ..
                     } = event
                     {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        toggle_tray_window(tray.app_handle(), position.x, position.y);
                     }
                 })
                 .build(app)?;
+            #[cfg(target_os = "macos")]
+            configure_macos_tray_icon(&tray)?;
+            #[cfg(target_os = "macos")]
+            start_widget_sync(
+                app.state::<BridgeState>().inner().clone(),
+                app.state::<NativeBleState>().inner().clone(),
+            );
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == "tray-popup" {
+                if let WindowEvent::Focused(focused) = event {
+                    if *focused {
+                        TRAY_WINDOW_GAINED_FOCUS.store(true, Ordering::Relaxed);
+                    } else if TRAY_WINDOW_GAINED_FOCUS.load(Ordering::Relaxed)
+                        && current_time_ms()
+                            >= TRAY_FOCUS_GUARD_UNTIL_MS.load(Ordering::Relaxed)
+                    {
+                        let _ = window.hide();
+                    }
+                }
+                return;
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -1246,7 +1729,9 @@ pub fn run() {
             connection_status,
             ota_start,
             ota_progress,
-            bridge_action
+            bridge_action,
+            sync_widget_context,
+            open_main_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running Beacon");

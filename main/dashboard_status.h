@@ -43,6 +43,8 @@ esp_err_t dashboard_status_set_with_timing(uint8_t led_index, panel_state_t stat
 esp_err_t dashboard_status_set_usage(uint8_t remaining_percent,
                                      uint8_t period_used_percent);
 esp_err_t dashboard_status_set_system_effect(led_effect_t effect);
+// 系统灯独立亮度，作为其既有亮度的比例；整体亮度仍是全局上限。
+esp_err_t dashboard_status_set_system_brightness(uint8_t brightness_percent);
 
 // 一次更新第一颗用量灯与后五颗任务灯
 esp_err_t dashboard_status_set_snapshot(uint8_t remaining_percent,
