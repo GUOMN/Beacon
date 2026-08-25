@@ -16,14 +16,14 @@ static uint8_t s_channel_count = 1U;
 static bool s_force_refresh = true;
 static SemaphoreHandle_t s_status_mutex;
 static led_status_t s_status[STATUS_LED_MAX_COUNT];
-static uint8_t s_master_brightness_percent = 100U;
+static uint8_t s_master_brightness_percent = STATUS_LED_DEFAULT_BRIGHTNESS_PERCENT;
 static uint8_t s_active_count = STATUS_LED_DEFAULT_COUNT;
 
 static uint8_t scale_channel(uint8_t channel, uint8_t brightness, float effect_scale)
 {
-    const uint32_t scaled = (uint32_t)channel * brightness * STATUS_LED_BRIGHTNESS;
+    const uint32_t scaled = (uint32_t)channel * brightness;
     return (uint8_t)((scaled * effect_scale * s_master_brightness_percent) /
-                     (255.0f * 255.0f * 100.0f));
+                     (255.0f * 100.0f));
 }
 
 static float effect_scale(const led_status_t *status, uint32_t now_ms)

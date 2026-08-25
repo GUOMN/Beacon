@@ -1,0 +1,37 @@
+name: Build ESP32-C3 firmware
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build OTA firmware
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.3.0
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build ESP32-C3 firmware
+        run: |
+          idf.py set-target esp32c3
+          idf.py build
+
+      - name: Prepare OTA and direct-flash firmware
+        run: |
+          mkdir -p artifacts
+          cp build/ws2812_status.bin artifacts/ws2812-status-ota.bin
+          esptool.py --chip esp32c3 merge_bin -o artifacts/ws2812-status-direct-flash.bin @build/flash_args
+
+      - name: Upload firmware packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ws2812-status-firmware
+          if-no-files-found: error
+          path: |
+            artifacts/ws2812-status-ota.bin
+            artifacts/ws2812-status-direct-flash.bin
+            build/ws2812_status.elf

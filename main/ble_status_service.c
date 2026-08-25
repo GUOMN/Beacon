@@ -114,7 +114,7 @@ static void identify_task(void *arg)
             .red = 255,
             .green = 255,
             .blue = 255,
-            .brightness = STATUS_LED_BRIGHTNESS,
+            .brightness = 255,
             .effect = LED_EFFECT_BREATHE,
             .period_ms = 900,
             .phase_offset_ms = (uint16_t)i * 150U,

@@ -11,8 +11,8 @@
 // 固件一次性预留的最大灯珠数；上位机可在 2~64 之间修改实际数量
 #define STATUS_LED_MAX_COUNT             64U
 
-// 全局最大亮度：范围 1~255，用于限制整条灯带的最高亮度
-#define STATUS_LED_BRIGHTNESS            96U
+// 灯板首次启动时的全局亮度百分比；之后由上位机亮度滑块统一控制。
+#define STATUS_LED_DEFAULT_BRIGHTNESS_PERCENT 30U
 
 // 第一颗系统灯的单次点亮时间：做成类似路由器指示灯的短脉冲
 // 用量仍然只改变脉冲出现的周期，每次亮灯时间固定为 80 毫秒
@@ -55,8 +55,8 @@
 #error "STATUS_LED_DEFAULT_COUNT 必须在 2~STATUS_LED_MAX_COUNT 之间"
 #endif
 
-#if STATUS_LED_BRIGHTNESS == 0U || STATUS_LED_BRIGHTNESS > 255U
-#error "STATUS_LED_BRIGHTNESS 必须在 1~255 之间"
+#if STATUS_LED_DEFAULT_BRIGHTNESS_PERCENT > 100U
+#error "STATUS_LED_DEFAULT_BRIGHTNESS_PERCENT 必须在 0~100 之间"
 #endif
 
 #if STATUS_BLINK_PULSE_MS == 0U

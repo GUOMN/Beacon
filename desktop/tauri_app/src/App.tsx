@@ -18,7 +18,7 @@ function Toggle({on=true,onChange,disabled=false,label="切换数据源"}:{on?:b
 function App(){
  const [splash,setSplash]=useState(true);
  const [page,setPage]=useState<"tasks"|"settings">("tasks");
- const [brightness,setBrightness]=useState(60);
+ const [brightness,setBrightness]=useState(30);
  const [tasks,setTasks]=useState<Task[]>(demoTasks);
  const [metrics,setMetrics]=useState({busy_percent:0,five_hour_tokens:0,seven_day_tokens:0});
  const [backendError,setBackendError]=useState("");
