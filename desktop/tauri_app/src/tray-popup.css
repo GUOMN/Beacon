@@ -1,4 +1,7 @@
 html.tray-view,html.tray-view body,html.tray-view #root{width:100%;height:100%;min-width:0;min-height:0;overflow:hidden;background:transparent}
+html.tray-view[data-theme="default"],html.tray-view[data-theme="default"] body,html.tray-view[data-theme="default"] #root{background:#f8fafc}
+html.tray-view[data-theme="mecha"],html.tray-view[data-theme="mecha"] body,html.tray-view[data-theme="mecha"] #root{background:#080d0a}
+html.tray-view[data-theme="aldnoah"],html.tray-view[data-theme="aldnoah"] body,html.tray-view[data-theme="aldnoah"] #root{background:#11172c}
 .tray-panel{position:relative;display:flex;flex-direction:column;width:100%;height:100%;overflow:hidden;border:1px solid #d7dde5;border-radius:8px;background:#f8fafc;color:#252d36;box-shadow:0 18px 48px #17202b3d;font-family:Inter,"Segoe UI","Microsoft YaHei UI",sans-serif}
 .tray-panel[data-origin="top"]{--tray-open-y:-22px;--tray-clip-top:0%;--tray-clip-bottom:100%;transform-origin:top center}.tray-panel[data-origin="bottom"]{--tray-open-y:22px;--tray-clip-top:100%;--tray-clip-bottom:0%;transform-origin:bottom center}
 .tray-panel.tray-opening{animation:tray-default-open .42s cubic-bezier(.16,1,.3,1) both}.tray-panel.tray-opening .tray-header{animation:tray-content-in .34s .08s cubic-bezier(.16,1,.3,1) both}.tray-panel.tray-opening .tray-columns{animation:tray-content-in .3s .14s ease-out both}.tray-panel.tray-opening .tray-row{animation:tray-row-in .36s calc(.16s + var(--tray-row-delay)) cubic-bezier(.16,1,.3,1) both}

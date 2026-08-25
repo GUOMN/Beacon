@@ -78,13 +78,14 @@ export default function TrayPopup() {
       setOpening(value => value + 1);
     };
     window.addEventListener("storage", syncTheme);
-    window.addEventListener("focus", reveal);
+    window.addEventListener("beacon-tray-open", reveal);
     return () => {
       window.removeEventListener("storage", syncTheme);
-      window.removeEventListener("focus", reveal);
+      window.removeEventListener("beacon-tray-open", reveal);
     };
   }, []);
   useEffect(() => {
+    document.documentElement.dataset.theme = theme;
     void invoke("sync_widget_context", { theme });
   }, [theme]);
 

@@ -9,5 +9,7 @@ import "./theme.css";
 import "./tray-popup.css";
 
 const trayView = new URLSearchParams(window.location.search).get("view") === "tray";
+const savedTheme = localStorage.getItem("beacon-theme");
+document.documentElement.dataset.theme = savedTheme === "mecha" || savedTheme === "aldnoah" ? savedTheme : "default";
 if (trayView) document.documentElement.classList.add("tray-view");
 ReactDOM.createRoot(document.getElementById("root")!).render(<React.StrictMode>{trayView?<TrayPopup/>:<App/>}</React.StrictMode>);

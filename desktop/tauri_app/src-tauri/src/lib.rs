@@ -21,6 +21,7 @@ use std::{
 };
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::window::Color;
 use tauri::{Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tokio::sync::Mutex as AsyncMutex;
 #[cfg(not(target_os = "macos"))]
@@ -822,17 +823,26 @@ fn start_widget_sync(bridge: BridgeState, ble: NativeBleState) {
 }
 
 #[tauri::command]
-fn sync_widget_context(theme: String) -> Result<(), String> {
+fn sync_widget_context(app: tauri::AppHandle, theme: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let theme = match theme.as_str() {
             "mecha" | "aldnoah" => theme,
             _ => "default".to_string(),
         };
+        let background = match theme.as_str() {
+            "mecha" => Color(8, 13, 10, 255),
+            "aldnoah" => Color(17, 23, 44, 255),
+            _ => Color(248, 250, 252, 255),
+        };
+        if let Some(window) = app.get_webview_window("tray-popup") {
+            let _ = window.set_background_color(Some(background));
+        }
         return write_widget_json("context.json", &serde_json::json!({"theme":theme}));
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = app;
         let _ = theme;
         Ok(())
     }
@@ -1391,46 +1401,12 @@ const TRAY_WINDOW_WIDTH: f64 = 480.0;
 const TRAY_WINDOW_HEIGHT: f64 = 520.0;
 static TRAY_FOCUS_GUARD_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 static TRAY_WINDOW_GAINED_FOCUS: AtomicBool = AtomicBool::new(false);
-static TRAY_OPEN_ANIMATION_ID: AtomicU64 = AtomicU64::new(0);
 
 fn current_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-fn animate_tray_window_open(
-    window: tauri::WebviewWindow,
-    animation_id: u64,
-    start_position: PhysicalPosition<i32>,
-    start_size: PhysicalSize<u32>,
-    target_position: PhysicalPosition<i32>,
-    target_size: PhysicalSize<u32>,
-) {
-    tauri::async_runtime::spawn(async move {
-        const STEPS: u32 = 12;
-        for step in 1..=STEPS {
-            tokio::time::sleep(std::time::Duration::from_millis(18)).await;
-            if TRAY_OPEN_ANIMATION_ID.load(Ordering::Relaxed) != animation_id
-                || !window.is_visible().unwrap_or(false)
-            {
-                break;
-            }
-            let progress = step as f64 / STEPS as f64;
-            let eased = 1.0 - (1.0 - progress).powi(3);
-            let interpolate = |start: i32, target: i32| {
-                (start as f64 + (target - start) as f64 * eased).round() as i32
-            };
-            let width = interpolate(start_size.width as i32, target_size.width as i32).max(1) as u32;
-            let height = interpolate(start_size.height as i32, target_size.height as i32).max(1) as u32;
-            let _ = window.set_size(PhysicalSize::new(width, height));
-            let _ = window.set_position(PhysicalPosition::new(
-                interpolate(start_position.x, target_position.x),
-                interpolate(start_position.y, target_position.y),
-            ));
-        }
-    });
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -1536,10 +1512,12 @@ fn present_macos_tray_window(window: &tauri::WebviewWindow) -> tauri::Result<()>
     unsafe {
         let native_window = &*pointer;
         let application = NSApplication::sharedApplication(main_thread);
+        native_window.setLevel(NSPopUpMenuWindowLevel);
+        // Put the all-Spaces window onto the currently visible Space before
+        // activating Beacon. Activating first assigns it to Beacon's desktop.
+        native_window.orderFrontRegardless();
         #[allow(deprecated)]
         application.activateIgnoringOtherApps(true);
-        native_window.setLevel(NSPopUpMenuWindowLevel);
-        native_window.orderFrontRegardless();
         native_window.makeKeyAndOrderFront(None);
     }
     Ok(())
@@ -1640,33 +1618,22 @@ fn toggle_tray_window(app: &tauri::AppHandle, click_x: f64, click_y: f64) {
             y,
         );
     }
-    let start_size = PhysicalSize::new(
-        (58.0 * scale).round() as u32,
-        (30.0 * scale).round() as u32,
-    );
-    let start_position = PhysicalPosition::new(
-        target_position.x + (target_size.width as i32 - start_size.width as i32) / 2,
-        target_position.y,
-    );
-    let animation_id = TRAY_OPEN_ANIMATION_ID.fetch_add(1, Ordering::Relaxed) + 1;
-    let _ = window.set_size(start_size);
-    let _ = window.set_position(start_position);
+    // Size the hidden native window first. Theme-specific CSS owns the visible
+    // reveal so its direction and timing are not overridden by WebView resizing.
+    let _ = window.set_size(target_size);
+    let _ = window.set_position(target_position);
     TRAY_WINDOW_GAINED_FOCUS.store(false, Ordering::Relaxed);
     TRAY_FOCUS_GUARD_UNTIL_MS.store(current_time_ms() + 1_200, Ordering::Relaxed);
+    let _ = window.eval("window.dispatchEvent(new Event('beacon-tray-open'))");
+    #[cfg(not(target_os = "macos"))]
     let _ = window.show();
-    animate_tray_window_open(
-        window.clone(),
-        animation_id,
-        start_position,
-        start_size,
-        target_position,
-        target_size,
-    );
+    #[cfg(target_os = "macos")]
+    let _ = present_macos_tray_window(&window);
     #[cfg(target_os = "macos")]
     {
-        let _ = present_macos_tray_window(&window);
         keep_macos_tray_window_in_front(window.clone());
     }
+    #[cfg(not(target_os = "macos"))]
     let _ = window.set_focus();
 }
 
@@ -1690,6 +1657,7 @@ pub fn run() {
             .decorations(false)
             .always_on_top(true)
             .visible_on_all_workspaces(true)
+            .background_color(Color(248, 250, 252, 255))
             .skip_taskbar(true)
             .shadow(true)
             .visible(false)
