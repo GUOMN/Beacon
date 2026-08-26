@@ -45,7 +45,7 @@ function App(){
  useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),2000);return()=>clearInterval(timer)},[refresh]);
  useEffect(()=>{invoke<{led_count:number}>("bridge_action",{action:"settings",payload:{}}).then(data=>setTaskSlotCount(Math.max(1,data.led_count-1)))},[]);
  useEffect(()=>{const handler=(event:Event)=>{const detail=(event as CustomEvent).detail;setSaveState(detail==="success"?"success":"error");setTimeout(()=>setSaveState("idle"),2200)};window.addEventListener("save-result",handler);return()=>window.removeEventListener("save-result",handler)},[]);
- useEffect(()=>{const timer=setTimeout(()=>setSplash(false),1650);return()=>clearTimeout(timer)},[]);
+ useEffect(()=>{const timer=setTimeout(()=>setSplash(false),3000);return()=>clearTimeout(timer)},[]);
  useEffect(()=>{void getVersion().then(setAppVersion).catch(()=>{})},[]);
  useEffect(()=>{localStorage.setItem("beacon-theme",theme);document.documentElement.dataset.theme=theme;void invoke("sync_widget_context",{theme})},[theme]);
  if(splash)return <div className="beacon-splash" data-theme={theme}><div className="splash-glow"/><div className="splash-rings"><i/><i/><i/></div><img src={beaconIcon} alt="Beacon"/><strong>{ui.brand}</strong><span>{ui.brandSub}</span><small>{theme==="default"?"正在连接你的状态世界":theme==="aldnoah"?"ORBITAL LINK // INITIALIZING":"SYSTEM BOOT // TACTICAL LINK INITIALIZING"}</small></div>;
