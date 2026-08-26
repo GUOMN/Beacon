@@ -43,6 +43,10 @@ pub struct Connection {
     control: GattCharacteristic,
     ota: GattCharacteristic,
     info: GattCharacteristic,
+    pub firmware_version: Option<String>,
+    pub partition: Option<String>,
+    pub build_date: Option<String>,
+    pub build_time: Option<String>,
 }
 
 impl Connection {
@@ -255,14 +259,26 @@ pub async fn connect(address: &str, device_id: &str) -> Result<Connection, Strin
     let control = characteristic(&service, CONTROL_GUID).await?;
     let ota = characteristic(&service, OTA_GUID).await?;
     let info = characteristic(&service, INFO_GUID).await?;
-    Ok(Connection {
+    let mut connection = Connection {
         device,
         device_id: device_id.to_ascii_uppercase(),
         address: address.to_string(),
         control,
         ota,
         info,
-    })
+        firmware_version: None,
+        partition: None,
+        build_date: None,
+        build_time: None,
+    };
+    if let Ok(value) = connection.read_info().await {
+        let (version, partition, date, time) = parse_firmware_info(&value);
+        connection.firmware_version = version;
+        connection.partition = partition;
+        connection.build_date = date;
+        connection.build_time = time;
+    }
+    Ok(connection)
 }
 
 pub fn parse_firmware_info(

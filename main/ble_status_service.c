@@ -41,6 +41,8 @@ static const esp_partition_t *s_ota_partition;
 static size_t s_ota_expected_size;
 static size_t s_ota_received_size;
 static bool s_ota_active;
+static bool s_v2_sequence_valid;
+static uint8_t s_last_v2_sequence;
 
 static void delayed_restart_task(void *arg)
 {
@@ -51,6 +53,7 @@ static void delayed_restart_task(void *arg)
 
 #define PACKET_MAGIC             0xC3U
 #define PACKET_VERSION           0x01U
+#define PACKET_VERSION_ORDERED   0x02U
 #define PACKET_TYPE_HEARTBEAT     0x01U
 #define PACKET_TYPE_SNAPSHOT      0x02U
 #define PACKET_TYPE_RAW_LED       0x03U
@@ -276,8 +279,17 @@ static int control_access(uint16_t conn_handle, uint16_t attr_handle,
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
 
-    if (packet[0] != PACKET_MAGIC || packet[1] != PACKET_VERSION) {
+    if (packet[0] != PACKET_MAGIC ||
+        (packet[1] != PACKET_VERSION && packet[1] != PACKET_VERSION_ORDERED)) {
         return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+    }
+    const bool ordered_packet = packet[1] == PACKET_VERSION_ORDERED;
+    if (ordered_packet && s_v2_sequence_valid) {
+        const uint8_t distance = (uint8_t)(packet[3] - s_last_v2_sequence);
+        if (distance == 0U || distance >= 128U) {
+            ESP_LOGW(TAG, "丢弃旧控制包 seq=%u last=%u", packet[3], s_last_v2_sequence);
+            return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+        }
     }
 
     esp_err_t result = ESP_ERR_INVALID_ARG;
@@ -437,8 +449,15 @@ static int control_access(uint16_t conn_handle, uint16_t attr_handle,
         break;
     }
 
+    ESP_LOGI(TAG, "控制包 type=0x%02x seq=%u len=%u result=%s",
+             packet[2], packet[3], packet_len, esp_err_to_name(result));
+
     if (result != ESP_OK) {
         return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+    }
+    if (ordered_packet) {
+        s_last_v2_sequence = packet[3];
+        s_v2_sequence_valid = true;
     }
 
     s_last_data_tick = xTaskGetTickCount();
@@ -517,6 +536,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
             s_connected = true;
+            s_v2_sequence_valid = false;
             s_ever_connected = true;
             s_last_data_tick = xTaskGetTickCount();
             s_disconnected_since_tick = 0;
@@ -531,6 +551,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         s_connected = false;
+        s_v2_sequence_valid = false;
         s_disconnected_since_tick = xTaskGetTickCount();
         ESP_LOGI(TAG, "蓝牙已断开，重新等待连接");
         ESP_ERROR_CHECK(dashboard_status_set_connection(false, false, true));

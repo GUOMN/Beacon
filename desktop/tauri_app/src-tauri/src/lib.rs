@@ -9,6 +9,7 @@ use btleplug::platform::{
 };
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     fs,
     io::{BufRead, BufReader, Write},
     path::PathBuf,
@@ -22,7 +23,7 @@ use std::{
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::window::Color;
-use tauri::{Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{Emitter, Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tokio::sync::Mutex as AsyncMutex;
 #[cfg(all(not(target_os = "macos"), not(windows)))]
 use uuid::Uuid;
@@ -282,12 +283,16 @@ struct NativeBleState {
     write_lock: Arc<AsyncMutex<()>>,
     ota_progress: Arc<AsyncMutex<Value>>,
     last_dashboard: Arc<AsyncMutex<Option<String>>>,
+    last_task_event_signature: Arc<AsyncMutex<Option<String>>>,
+    last_metrics_sync_ms: Arc<AtomicU64>,
     preview_active: Arc<AsyncMutex<bool>>,
     heartbeat_running: Arc<AtomicBool>,
     sequence: Arc<AtomicU8>,
     connected_device_id: Arc<AsyncMutex<Option<String>>>,
     manual_disconnect: Arc<AtomicBool>,
     foreground_operations: Arc<AtomicUsize>,
+    acknowledged_control: Arc<AsyncMutex<HashMap<u16, Vec<u8>>>>,
+    acknowledged_device_id: Arc<AsyncMutex<Option<String>>>,
 }
 
 impl NativeBleState {
@@ -306,12 +311,16 @@ impl NativeBleState {
                 "state": "idle", "progress": 0, "message": ""
             }))),
             last_dashboard: Arc::new(AsyncMutex::new(None)),
+            last_task_event_signature: Arc::new(AsyncMutex::new(None)),
+            last_metrics_sync_ms: Arc::new(AtomicU64::new(0)),
             preview_active: Arc::new(AsyncMutex::new(false)),
             heartbeat_running: Arc::new(AtomicBool::new(false)),
             sequence: Arc::new(AtomicU8::new(0)),
             connected_device_id: Arc::new(AsyncMutex::new(None)),
             manual_disconnect: Arc::new(AtomicBool::new(false)),
             foreground_operations: Arc::new(AtomicUsize::new(0)),
+            acknowledged_control: Arc::new(AsyncMutex::new(HashMap::new())),
+            acknowledged_device_id: Arc::new(AsyncMutex::new(None)),
         }
     }
 }
@@ -352,16 +361,35 @@ async fn windows_connection_for(
         if connection.is_connected() && connection.device_id.eq_ignore_ascii_case(device_id) {
             return Ok(connection);
         }
+        state.acknowledged_control.lock().await.clear();
+        *state.acknowledged_device_id.lock().await = None;
     }
     let resolved_address = match address.filter(|value| !value.trim().is_empty()) {
         Some(value) => value.to_string(),
-        None => state
-            .windows_addresses
-            .lock()
-            .await
-            .get(&device_id.to_ascii_uppercase())
-            .cloned()
-            .ok_or("本次扫描中没有目标灯板，请重新扫描")?,
+        None => {
+            let cached = state
+                .windows_addresses
+                .lock()
+                .await
+                .get(&device_id.to_ascii_uppercase())
+                .cloned();
+            if let Some(value) = cached {
+                value
+            } else {
+                // Startup reconnect uses a fresh native advertisement scan;
+                // no historical address or device metadata is read from disk.
+                let boards = windows_ble::scan(4).await?;
+                let mut addresses = state.windows_addresses.lock().await;
+                for board in &boards {
+                    addresses.insert(board.device_id.to_ascii_uppercase(), board.address.clone());
+                }
+                boards
+                    .into_iter()
+                    .find(|board| board.device_id.eq_ignore_ascii_case(device_id))
+                    .map(|board| board.address)
+                    .ok_or("自动重连没有发现已绑定灯板")?
+            }
+        }
     };
     let connection = tokio::time::timeout(
         std::time::Duration::from_secs(DEVICE_CONNECT_TIMEOUT_SECS),
@@ -916,19 +944,33 @@ async fn get_dashboard(
 ) -> Result<Value, String> {
     let result =
         run_bridge_async(bridge.inner().clone(), "dashboard", serde_json::json!({})).await?;
-    let signature = serde_json::to_string(&result).map_err(|error| error.to_string())?;
-    let should_push = ble.foreground_operations.load(Ordering::SeqCst) == 0
+    let signature = task_event_signature(&result)?;
+    let allowed = ble.foreground_operations.load(Ordering::SeqCst) == 0
         && !ble.manual_disconnect.load(Ordering::SeqCst)
-        && !*ble.preview_active.lock().await
-        && {
-            let mut previous = ble.last_dashboard.lock().await;
-            if previous.as_ref() == Some(&signature) {
-                false
-            } else {
-                *previous = Some(signature);
-                true
-            }
-        };
+        && !*ble.preview_active.lock().await;
+    let task_changed = if allowed {
+        let mut previous = ble.last_dashboard.lock().await;
+        if previous.as_ref() == Some(&signature) {
+            false
+        } else {
+            *previous = Some(signature);
+            true
+        }
+    } else {
+        false
+    };
+    // Live CPU/memory values fluctuate on every UI refresh. They are useful as
+    // a low-frequency fallback, but must not create a BLE write storm. Task
+    // state changes remain event-driven and immediate.
+    let now = current_time_ms();
+    let previous_metrics = ble.last_metrics_sync_ms.load(Ordering::SeqCst);
+    let periodic_due = allowed
+        && now.saturating_sub(previous_metrics) >= 10_000
+        && ble
+            .last_metrics_sync_ms
+            .compare_exchange(previous_metrics, now, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+    let should_push = allowed && (task_changed || periodic_due);
     if should_push {
         // Startup remains responsive even when the bound board is asleep. A
         // failed background sync is retried only after the dashboard changes
@@ -950,6 +992,129 @@ async fn get_dashboard(
         });
     }
     Ok(result)
+}
+
+fn task_event_signature(dashboard: &Value) -> Result<String, String> {
+    serde_json::to_string(dashboard.get("tasks").unwrap_or(&Value::Null))
+        .map_err(|error| error.to_string())
+}
+
+fn start_task_event_sync(app: tauri::AppHandle) -> Result<(), String> {
+    use notify::{RecursiveMode, Watcher};
+    let sync_gate = Arc::new(tokio::sync::Mutex::new(()));
+    let sync_revision = Arc::new(AtomicUsize::new(0));
+    #[cfg(windows)]
+    let directory = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("CodexStatusBridge");
+    #[cfg(target_os = "macos")]
+    let directory = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Library/Application Support/CodexStatusBridge");
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let directory = std::env::temp_dir().join("CodexStatusBridge");
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |event| {
+        let _ = sender.send(event);
+    })
+    .map_err(|error| format!("初始化任务事件监听失败：{error}"))?;
+    watcher
+        .watch(&directory, RecursiveMode::NonRecursive)
+        .map_err(|error| format!("监听任务数据库失败：{error}"))?;
+    std::thread::spawn(move || {
+        let _watcher = watcher;
+        while let Ok(event) = receiver.recv() {
+            let Ok(event) = event else { continue };
+            if !event.paths.iter().any(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("status-events.sqlite"))
+            }) {
+                continue;
+            }
+            while receiver
+                .recv_timeout(std::time::Duration::from_millis(80))
+                .is_ok()
+            {}
+            let app_handle = app.clone();
+            let gate = sync_gate.clone();
+            let revision_counter = sync_revision.clone();
+            let revision = revision_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            tauri::async_runtime::spawn(async move {
+                let _gate = gate.lock().await;
+                // Coalesce changes that arrived while an earlier BLE write was
+                // in flight. Only the newest queued event needs another full
+                // snapshot; older queued snapshots must never overwrite it.
+                if revision != revision_counter.load(Ordering::SeqCst) {
+                    return;
+                }
+                let bridge = app_handle.state::<BridgeState>().inner().clone();
+                let ble = app_handle.state::<NativeBleState>().inner().clone();
+                // SQLite WAL/SHM files can change even when no task state has
+                // changed. Compare the semantic task snapshot first so those
+                // filesystem events do not cause repeated BLE writes.
+                let bridge_for_dashboard = bridge.clone();
+                let dashboard = match tauri::async_runtime::spawn_blocking(move || {
+                    run_persistent_bridge(
+                        &bridge_for_dashboard,
+                        "dashboard",
+                        &serde_json::json!({}),
+                    )
+                })
+                .await
+                {
+                    Ok(Ok(value)) => value,
+                    _ => return,
+                };
+                let task_signature = match task_event_signature(&dashboard) {
+                    Ok(value) => value,
+                    Err(_) => return,
+                };
+                {
+                    let mut previous = ble.last_task_event_signature.lock().await;
+                    if previous.as_ref() == Some(&task_signature) {
+                        return;
+                    }
+                    *previous = Some(task_signature.clone());
+                }
+                *ble.last_dashboard.lock().await = Some(task_signature);
+                // The connection-status snapshot can briefly be false while
+                // WinRT is refreshing its session. Do not drop the database
+                // event in that window: native_apply can reuse or reconnect
+                // the bound board. Retry transient GATT failures so terminal
+                // events such as task completion are not lost.
+                let mut applied = false;
+                for attempt in 0..3 {
+                    if native_apply(
+                        bridge.clone(),
+                        ble.clone(),
+                        serde_json::json!({}),
+                        false,
+                    )
+                    .await
+                    .is_ok()
+                    {
+                        applied = true;
+                        ble.last_metrics_sync_ms
+                            .store(current_time_ms(), Ordering::SeqCst);
+                        break;
+                    }
+                    if attempt < 2 {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                }
+                if !applied {
+                    *ble.last_dashboard.lock().await = None;
+                    *ble.last_task_event_signature.lock().await = None;
+                }
+                let _ = app_handle.emit("task-data-changed", ());
+            });
+        }
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -1281,6 +1446,8 @@ async fn disconnect_device(
         }
         *state.connected_device_id.lock().await = None;
         *state.last_dashboard.lock().await = None;
+        state.acknowledged_control.lock().await.clear();
+        *state.acknowledged_device_id.lock().await = None;
         return Ok(serde_json::json!({
             "ok": true,
             "connection": connection_status_value(state.inner()).await?,
@@ -1297,6 +1464,8 @@ async fn disconnect_device(
         }
         *state.connected_device_id.lock().await = None;
         *state.last_dashboard.lock().await = None;
+        state.acknowledged_control.lock().await.clear();
+        *state.acknowledged_device_id.lock().await = None;
         return Ok(serde_json::json!({
             "ok": true,
             "connection": connection_status_value(state.inner()).await?,
@@ -1318,6 +1487,8 @@ async fn disconnect_device(
         }
         *state.connected_device_id.lock().await = None;
         *state.last_dashboard.lock().await = None;
+        state.acknowledged_control.lock().await.clear();
+        *state.acknowledged_device_id.lock().await = None;
         Ok(serde_json::json!({
             "ok": true,
             "connection": connection_status_value(state.inner()).await?,
@@ -1356,24 +1527,20 @@ async fn connection_status_value(state: &NativeBleState) -> Result<Value, String
     {
         let connection = state.windows_connection.lock().await.clone();
         let connected = connection.as_ref().is_some_and(windows_ble::Connection::is_connected);
-        let (device_id, address, firmware) = if connected {
+        let (device_id, address, firmware_version, partition, build_date, build_time) = if connected {
             let current = connection.as_ref().unwrap();
-            let info = tokio::time::timeout(
-                std::time::Duration::from_secs(DEVICE_WRITE_TIMEOUT_SECS),
-                current.read_info(),
+            (
+                Some(current.device_id.clone()),
+                Some(current.address.clone()),
+                current.firmware_version.clone(),
+                current.partition.clone(),
+                current.build_date.clone(),
+                current.build_time.clone(),
             )
-            .await
-            .ok()
-            .and_then(Result::ok);
-            (Some(current.device_id.clone()), Some(current.address.clone()), info)
         } else {
-            (None, None, None)
+            (None, None, None, None, None, None)
         };
         *state.connected_device_id.lock().await = device_id.clone();
-        let (firmware_version, partition, build_date, build_time) = firmware
-            .as_deref()
-            .map(windows_ble::parse_firmware_info)
-            .unwrap_or_default();
         return Ok(serde_json::json!({
             "connected": connected,
             "device_id": device_id,
@@ -1539,6 +1706,40 @@ async fn ota_progress(state: tauri::State<'_, NativeBleState>) -> Result<Value, 
     Ok(state.ota_progress.lock().await.clone())
 }
 
+fn control_packet_key(packet: &[u8]) -> u16 {
+    let packet_type = packet.get(2).copied().unwrap_or_default() as u16;
+    let item = match packet_type as u8 {
+        0x05 | 0x06 => packet.get(4).copied().unwrap_or_default() as u16,
+        _ => 0,
+    };
+    (packet_type << 8) | item
+}
+
+fn normalized_control_packet(packet: &[u8]) -> Vec<u8> {
+    let mut normalized = packet.to_vec();
+    if normalized.len() >= 4 {
+        normalized[1] = 0;
+        normalized[3] = 0;
+    }
+    normalized
+}
+
+async fn acknowledge_control_packets(
+    ble: &NativeBleState,
+    device_id: &str,
+    packets: &[Vec<u8>],
+    replace: bool,
+) {
+    let mut cache = ble.acknowledged_control.lock().await;
+    if replace {
+        cache.clear();
+    }
+    for packet in packets {
+        cache.insert(control_packet_key(packet), normalized_control_packet(packet));
+    }
+    *ble.acknowledged_device_id.lock().await = Some(device_id.to_string());
+}
+
 async fn native_apply(
     bridge: BridgeState,
     ble: NativeBleState,
@@ -1556,14 +1757,25 @@ async fn native_apply(
     if let Some(preview) = payload.get("preview").and_then(Value::as_bool) {
         *ble.preview_active.lock().await = preview;
     }
-    // A manual save owns the connection for the whole prepare/write transaction.
-    // A background refresh prepares without the lock, then yields if any foreground
-    // operation arrived while it was working or waiting for the connection.
+    // Own the connection before reading the database. Preparing a background
+    // snapshot outside this lock allowed an old snapshot to wait behind a newer
+    // mutation and then overwrite it on the board.
     let explicit_connection = if explicit {
         Some(ble.write_lock.clone().lock_owned().await)
     } else {
         None
     };
+    let background_connection = if explicit {
+        None
+    } else {
+        Some(ble.write_lock.clone().lock_owned().await)
+    };
+    if !explicit
+        && (ble.manual_disconnect.load(Ordering::SeqCst)
+            || ble.foreground_operations.load(Ordering::SeqCst) > 0)
+    {
+        return Err("前台正在使用蓝牙连接".into());
+    }
     payload["_native_transport"] = Value::Bool(true);
     let prepared = tauri::async_runtime::spawn_blocking(move || {
         run_persistent_bridge(&bridge, "apply-device", &payload)
@@ -1580,32 +1792,61 @@ async fn native_apply(
         .and_then(Value::as_array)
         .ok_or("配置数据生成失败")?
         .clone();
+    let decoded = packets
+        .iter()
+        .map(|encoded| {
+            let value = encoded.as_str().ok_or("配置数据格式无效")?;
+            BASE64.decode(value).map_err(|_| "配置数据格式无效".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let same_device = ble
+        .acknowledged_device_id
+        .lock()
+        .await
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case(&device_id));
+    let full_sync = explicit || !same_device || ble.acknowledged_control.lock().await.is_empty();
+    let mut packets_to_send = if full_sync {
+        decoded.clone()
+    } else {
+        let cache = ble.acknowledged_control.lock().await;
+        decoded
+            .iter()
+            .filter(|packet| {
+                cache.get(&control_packet_key(packet))
+                    != Some(&normalized_control_packet(packet))
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    // Assign ordered-protocol sequence numbers only to packets that will
+    // actually be written. Unchanged packets must not consume sequence space.
+    for bytes in &mut packets_to_send {
+        if bytes.len() >= 4 {
+            bytes[1] = 2;
+            bytes[3] = ble.sequence.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+        }
+    }
     if !explicit
         && (ble.manual_disconnect.load(Ordering::SeqCst)
             || ble.foreground_operations.load(Ordering::SeqCst) > 0)
     {
         return Err("设备已被主动断开".into());
     }
-    let background_connection = if explicit {
-        None
-    } else {
-        Some(ble.write_lock.clone().lock_owned().await)
-    };
-    if !explicit
-        && (ble.manual_disconnect.load(Ordering::SeqCst)
-            || ble.foreground_operations.load(Ordering::SeqCst) > 0)
-    {
-        return Err("前台正在使用蓝牙连接".into());
-    }
     #[cfg(target_os = "macos")]
     {
+        let encoded_packets = packets_to_send
+            .iter()
+            .map(|bytes| Value::String(BASE64.encode(bytes)))
+            .collect::<Vec<_>>();
         let request = serde_json::json!({
             "command": "apply",
             "device_id": device_id,
-            "packets": packets,
+            "packets": encoded_packets,
         });
         let _connection = (explicit_connection, background_connection);
         run_macos_ble_request_async(request).await?;
+        acknowledge_control_packets(&ble, &device_id, &packets_to_send, full_sync).await;
         let applied_device_id = prepared
             .get("device_id")
             .and_then(Value::as_str)
@@ -1619,14 +1860,13 @@ async fn native_apply(
     {
         let native = windows_connection_for(&ble, None, &device_id).await?;
         let _connection = (explicit_connection, background_connection);
-        let decoded = packets
-            .iter()
-            .map(|encoded| {
-                let value = encoded.as_str().ok_or("配置数据格式无效")?;
-                BASE64.decode(value).map_err(|_| "配置数据格式无效".to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        for bytes in &decoded {
+        for bytes in &packets_to_send {
+            eprintln!(
+                "[BLE TX] type=0x{:02X} seq={} payload={:02X?}",
+                bytes.get(2).copied().unwrap_or_default(),
+                bytes.get(3).copied().unwrap_or_default(),
+                bytes.get(4..).unwrap_or_default()
+            );
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(DEVICE_WRITE_TIMEOUT_SECS),
                 native.write_control(bytes, true),
@@ -1635,10 +1875,14 @@ async fn native_apply(
             .map_err(|_| "配置下发超时".to_string())?;
             if let Err(error) = result {
                 if bytes.get(2) != Some(&0x0C) {
+                    eprintln!("[BLE NACK] type=0x{:02X}: {error}", bytes.get(2).copied().unwrap_or_default());
                     return Err(format!("配置下发失败：{error}"));
                 }
+            } else {
+                eprintln!("[BLE ACK] type=0x{:02X}", bytes.get(2).copied().unwrap_or_default());
             }
         }
+        acknowledge_control_packets(&ble, &device_id, &packets_to_send, full_sync).await;
         *ble.windows_connection.lock().await = Some(native);
         *ble.connected_device_id.lock().await = Some(device_id);
         start_heartbeat(ble.clone());
@@ -1681,16 +1925,7 @@ async fn native_apply(
         };
         let control = characteristic(&peripheral, CONTROL_UUID)?;
         let _connection = (explicit_connection, background_connection);
-        let decoded = packets
-            .iter()
-            .map(|encoded| {
-                let value = encoded.as_str().ok_or("配置数据格式无效")?;
-                BASE64
-                    .decode(value)
-                    .map_err(|_| "配置数据格式无效".to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        for bytes in &decoded {
+        for bytes in &packets_to_send {
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(DEVICE_WRITE_TIMEOUT_SECS),
                 peripheral.write(&control, bytes, WriteType::WithResponse),
@@ -1705,6 +1940,7 @@ async fn native_apply(
                 }
             }
         }
+        acknowledge_control_packets(&ble, &device_id, &packets_to_send, full_sync).await;
         *ble.peripheral.lock().await = Some(peripheral);
         *ble.connected_device_id.lock().await = Some(device_id);
         start_heartbeat(ble.clone());
@@ -1814,6 +2050,29 @@ async fn bridge_action(
 ) -> Result<Value, String> {
     if action == "apply-device" {
         return native_apply(bridge.inner().clone(), ble.inner().clone(), payload, true).await;
+    }
+    if action == "manage-tasks" {
+        let bridge_state = bridge.inner().clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            run_persistent_bridge(&bridge_state, "manage-tasks", &payload)
+        })
+        .await
+        .map_err(|error| format!("后台任务异常：{error}"))??;
+        *ble.last_dashboard.lock().await = None;
+        // A task mutation initiated by this client is already an exact change
+        // event. Push the resulting full snapshot before reporting success so
+        // deletion/cleanup cannot leave the board displaying stale slots. The
+        // filesystem watcher remains the cross-process path for external data
+        // sources, where there is no direct command to await.
+        native_apply(
+            bridge.inner().clone(),
+            ble.inner().clone(),
+            serde_json::json!({}),
+            false,
+        )
+        .await
+        .map_err(|error| format!("任务已更新，但灯板同步失败：{error}"))?;
+        return Ok(result);
     }
     let bridge_state = bridge.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -2076,7 +2335,15 @@ fn toggle_tray_window(app: &tauri::AppHandle, click_x: f64, click_y: f64) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(
+        |app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        },
+    ));
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
 
@@ -2084,6 +2351,7 @@ pub fn run() {
         .manage(BridgeState(Arc::new(Mutex::new(None))))
         .manage(NativeBleState::new())
         .setup(|app| {
+            start_task_event_sync(app.handle().clone())?;
             let tray_window = WebviewWindowBuilder::new(
                 app,
                 "tray-popup",

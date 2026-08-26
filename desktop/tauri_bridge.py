@@ -351,6 +351,12 @@ def apply_device(payload: dict[str, object]) -> dict[str, object]:
                 seq, int(state), style.color, style.effect, style.period_ms, style.blink_duty_percent
             ))
         add(lambda seq: BLEProtocol.encode_panel_header(seq, snapshot))
+        # Six-LED boards support the original atomic snapshot packet. Apply it
+        # before the extended per-task packets so a removal clears all five
+        # task slots in one acknowledged write; the packets below then add the
+        # per-task timing mode without exposing a stale trailing slot.
+        if len(snapshot.tasks) == 5:
+            add(lambda seq: BLEProtocol.encode_snapshot(seq, snapshot))
         for task_index, task in enumerate(snapshot.tasks):
             add(lambda seq, task_index=task_index, task=task: BLEProtocol.encode_task_state(
                 seq, task_index, task, include_timing_mode=True

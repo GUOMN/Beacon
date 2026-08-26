@@ -76,11 +76,11 @@ static void render_task(void *argument)
         for (uint8_t i = 0; i < active_count; ++i) {
             snapshot[i] = s_status[i];
         }
+        const bool force_refresh = s_force_refresh;
+        s_force_refresh = false;
         xSemaphoreGive(s_status_mutex);
 
         const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-        const bool force_refresh = s_force_refresh;
-        s_force_refresh = false;
         bool frame_changed = first_frame || force_refresh;
         for (uint8_t i = 0; i < active_count; ++i) {
             const float scale = effect_scale(&snapshot[i], now_ms);
@@ -181,6 +181,10 @@ esp_err_t led_status_set(uint8_t index, const led_status_t *status)
 
     xSemaphoreTake(s_status_mutex, portMAX_DELAY);
     s_status[index] = *status;
+    // A semantic state write must reach the physical strip even when the
+    // calculated RGB happens to equal the renderer's cached previous frame.
+    // That cache can temporarily diverge after identify/connection changes.
+    s_force_refresh = true;
     xSemaphoreGive(s_status_mutex);
     return ESP_OK;
 }
@@ -202,6 +206,7 @@ esp_err_t led_status_set_master_brightness(uint8_t percent)
     ESP_RETURN_ON_FALSE(percent <= 100U, ESP_ERR_INVALID_ARG, TAG, "全局亮度必须在 0~100 之间");
     xSemaphoreTake(s_status_mutex, portMAX_DELAY);
     s_master_brightness_percent = percent;
+    s_force_refresh = true;
     xSemaphoreGive(s_status_mutex);
     return ESP_OK;
 }
@@ -216,6 +221,7 @@ esp_err_t led_status_set_active_count(uint8_t count)
     }
     xSemaphoreTake(s_status_mutex, portMAX_DELAY);
     s_active_count = count;
+    s_force_refresh = true;
     xSemaphoreGive(s_status_mutex);
     return ESP_OK;
 }
