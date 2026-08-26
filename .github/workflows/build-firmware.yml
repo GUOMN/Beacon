@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   build:
-    name: Build OTA firmware
+    name: Build firmware packages
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -36,12 +36,16 @@ jobs:
             esptool.py --chip esp32c3 merge_bin
             -o ../artifacts/ws2812-status-direct-flash.bin @flash_args
 
-      - name: Upload firmware packages
+      - name: Upload OTA firmware
         uses: actions/upload-artifact@v4
         with:
-          name: ws2812-status-firmware
+          name: ws2812-status-ota
           if-no-files-found: error
-          path: |
-            artifacts/ws2812-status-ota.bin
-            artifacts/ws2812-status-direct-flash.bin
-            build/ws2812_status.elf
+          path: artifacts/ws2812-status-ota.bin
+
+      - name: Upload serial flash firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: ws2812-status-direct-flash
+          if-no-files-found: error
+          path: artifacts/ws2812-status-direct-flash.bin
