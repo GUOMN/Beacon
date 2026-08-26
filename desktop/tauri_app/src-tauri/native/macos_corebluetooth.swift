@@ -124,7 +124,10 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
 
     private func identify(_ request: [String: Any], completion: @escaping ([String: Any]) -> Void) {
         let target = target(from: request)
-        let wasConnected = currentPeripheral()?.state == .connected
+        let holdSeconds = max(0, (request["hold_ms"] as? NSNumber)?.doubleValue ?? 3200) / 1000
+        let wasConnected = currentPeripheral().map {
+            $0.state == .connected && matches($0, target: target)
+        } ?? false
         ensureConnected(target) { result in
             switch result {
             case .failure(let error): completion(["error": error])
@@ -132,7 +135,9 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
                 self.write([Data([0xC3, 1, 4, 0])], to: self.control) { writeResult in
                     if case .failure(let error) = writeResult { completion(["error": error]); return }
                     if wasConnected { completion(["ok": true]); return }
-                    self.disconnect { result in completion(self.response(result)) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + holdSeconds) {
+                        self.disconnect { result in completion(self.response(result)) }
+                    }
                 }
             }
         }

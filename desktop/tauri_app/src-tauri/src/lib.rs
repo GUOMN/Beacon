@@ -50,6 +50,8 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+const IDENTIFY_ANIMATION_HOLD_MS: u64 = 3_200;
+
 fn bridge_script() -> Result<PathBuf, String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut candidates = vec![executable
@@ -982,26 +984,52 @@ async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, St
 #[tauri::command]
 async fn identify_device(
     state: tauri::State<'_, NativeBleState>,
-    address: String,
+    address: Option<String>,
+    device_id: Option<String>,
 ) -> Result<Value, String> {
     let _foreground = ForegroundGuard::new(state.inner());
     let _connection = state.write_lock.lock().await;
+    let address = address.filter(|value| !value.trim().is_empty());
+    let device_id = device_id.filter(|value| !value.trim().is_empty());
+    if address.is_none() && device_id.is_none() {
+        return Err("识别目标缺少设备地址和唯一 ID".into());
+    }
     #[cfg(target_os = "macos")]
     {
         return run_macos_ble_request_async(serde_json::json!({
             "command": "identify",
             "address": address,
+            "device_id": device_id,
+            "hold_ms": IDENTIFY_ANIMATION_HOLD_MS,
         }))
         .await;
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let connected_device_id = state.connected_device_id.lock().await.clone();
         let (peripheral, reused_connection) = {
             let held = state.peripheral.lock().await;
             match held.as_ref() {
-                Some(item) if item.is_connected().await.unwrap_or(false) => (item.clone(), true),
+                Some(item)
+                    if item.is_connected().await.unwrap_or(false)
+                        && (address
+                            .as_deref()
+                            .is_some_and(|value| item.id().to_string() == value)
+                            || device_id.as_deref().is_some_and(|value| {
+                                connected_device_id
+                                    .as_deref()
+                                    .is_some_and(|held_id| held_id.eq_ignore_ascii_case(value))
+                            })) =>
+                {
+                    (item.clone(), true)
+                }
                 _ => (
-                    connect_peripheral(state.inner(), Some(&address), None).await?,
+                    connect_peripheral(
+                        state.inner(),
+                        address.as_deref(),
+                        device_id.as_deref(),
+                    )
+                    .await?,
                     false,
                 ),
             }
@@ -1015,6 +1043,10 @@ async fn identify_device(
             *state.peripheral.lock().await = Some(peripheral);
             start_heartbeat(state.inner().clone());
         } else {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                IDENTIFY_ANIMATION_HOLD_MS,
+            ))
+            .await;
             peripheral
                 .disconnect()
                 .await
