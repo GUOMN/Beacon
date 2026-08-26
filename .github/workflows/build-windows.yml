@@ -62,7 +62,7 @@ jobs:
           $release = "desktop/tauri_app/src-tauri/target/x86_64-pc-windows-msvc/release"
           $portable = "artifacts/windows/Beacon-Windows-x64-Portable"
           New-Item -ItemType Directory -Force $portable | Out-Null
-          Copy-Item "$release/Beacon.exe" "$portable/Beacon.exe"
+          Copy-Item "$release/codex-status-bridge.exe" "$portable/Beacon.exe"
           @'
           Beacon portable edition
 

@@ -2,6 +2,15 @@ name: Build ESP32-C3 firmware
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "main/**"
+      - "CMakeLists.txt"
+      - "sdkconfig.defaults"
+      - "partitions_ota_4mb.csv"
+      - "dependencies.lock"
+      - ".github/workflows/build-firmware.yml"
 
 permissions:
   contents: read
@@ -10,21 +19,21 @@ jobs:
   build:
     name: Build OTA firmware
     runs-on: ubuntu-latest
-    container: espressif/idf:v5.3.5
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
       - name: Build ESP32-C3 firmware
-        run: |
-          idf.py set-target esp32c3
-          idf.py build
-
-      - name: Prepare OTA and direct-flash firmware
-        run: |
-          mkdir -p artifacts
-          cp build/ws2812_status.bin artifacts/ws2812-status-ota.bin
-          esptool.py --chip esp32c3 merge_bin -o artifacts/ws2812-status-direct-flash.bin @build/flash_args
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.5
+          target: esp32c3
+          command: >-
+            idf.py build &&
+            mkdir -p artifacts &&
+            cp build/ws2812_status.bin artifacts/ws2812-status-ota.bin &&
+            esptool.py --chip esp32c3 merge_bin
+            -o artifacts/ws2812-status-direct-flash.bin @build/flash_args
 
       - name: Upload firmware packages
         uses: actions/upload-artifact@v4
