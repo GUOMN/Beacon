@@ -1,9 +1,9 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 use btleplug::api::{
     Central, CentralState, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
 };
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 use btleplug::platform::{
     Adapter as BleAdapter, Manager as BleManager, Peripheral as BlePeripheral,
 };
@@ -24,8 +24,11 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::window::Color;
 use tauri::{Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tokio::sync::Mutex as AsyncMutex;
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 use uuid::Uuid;
+
+#[cfg(windows)]
+mod windows_ble;
 
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{
@@ -50,9 +53,18 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+#[cfg(target_os = "macos")]
 const IDENTIFY_ANIMATION_HOLD_MS: u64 = 6_500;
 #[cfg(not(target_os = "macos"))]
-const IDENTIFY_RETRY_INTERVAL_MS: u64 = 750;
+const IDENTIFY_CONNECT_TIMEOUT_SECS: u64 = 5;
+#[cfg(not(target_os = "macos"))]
+const IDENTIFY_IO_TIMEOUT_SECS: u64 = 2;
+#[cfg(not(target_os = "macos"))]
+const IDENTIFY_WINDOWS_HOLD_MS: u64 = 3_200;
+#[cfg(not(target_os = "macos"))]
+const DEVICE_CONNECT_TIMEOUT_SECS: u64 = 10;
+#[cfg(not(target_os = "macos"))]
+const DEVICE_WRITE_TIMEOUT_SECS: u64 = 2;
 
 fn bridge_script() -> Result<PathBuf, String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -259,10 +271,14 @@ struct BridgeState(Arc<Mutex<Option<BridgeProcess>>>);
 
 #[derive(Clone)]
 struct NativeBleState {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     adapter: Arc<AsyncMutex<Option<BleAdapter>>>,
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     peripheral: Arc<AsyncMutex<Option<BlePeripheral>>>,
+    #[cfg(windows)]
+    windows_connection: Arc<AsyncMutex<Option<windows_ble::Connection>>>,
+    #[cfg(windows)]
+    windows_addresses: Arc<AsyncMutex<std::collections::HashMap<String, String>>>,
     write_lock: Arc<AsyncMutex<()>>,
     ota_progress: Arc<AsyncMutex<Value>>,
     last_dashboard: Arc<AsyncMutex<Option<String>>>,
@@ -277,10 +293,14 @@ struct NativeBleState {
 impl NativeBleState {
     fn new() -> Self {
         Self {
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(all(not(target_os = "macos"), not(windows)))]
             adapter: Arc::new(AsyncMutex::new(None)),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(all(not(target_os = "macos"), not(windows)))]
             peripheral: Arc::new(AsyncMutex::new(None)),
+            #[cfg(windows)]
+            windows_connection: Arc::new(AsyncMutex::new(None)),
+            #[cfg(windows)]
+            windows_addresses: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
             write_lock: Arc::new(AsyncMutex::new(())),
             ota_progress: Arc::new(AsyncMutex::new(serde_json::json!({
                 "state": "idle", "progress": 0, "message": ""
@@ -311,18 +331,49 @@ impl Drop for ForegroundGuard {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 const DEVICE_PREFIX: &str = "Codex-Light-";
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 const SERVICE_UUID: &str = "0100c310-7625-819e-934c-32b8e4177d6a";
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 const CONTROL_UUID: &str = "0200c310-7625-819e-934c-32b8e4177d6a";
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 const OTA_UUID: &str = "0300c310-7625-819e-934c-32b8e4177d6a";
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 const GAP_DEVICE_NAME_UUID: &str = "00002a00-0000-1000-8000-00805f9b34fb";
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+async fn windows_connection_for(
+    state: &NativeBleState,
+    address: Option<&str>,
+    device_id: &str,
+) -> Result<windows_ble::Connection, String> {
+    if let Some(connection) = state.windows_connection.lock().await.clone() {
+        if connection.is_connected() && connection.device_id.eq_ignore_ascii_case(device_id) {
+            return Ok(connection);
+        }
+    }
+    let resolved_address = match address.filter(|value| !value.trim().is_empty()) {
+        Some(value) => value.to_string(),
+        None => state
+            .windows_addresses
+            .lock()
+            .await
+            .get(&device_id.to_ascii_uppercase())
+            .cloned()
+            .ok_or("本次扫描中没有目标灯板，请重新扫描")?,
+    };
+    let connection = tokio::time::timeout(
+        std::time::Duration::from_secs(DEVICE_CONNECT_TIMEOUT_SECS),
+        windows_ble::connect(&resolved_address, device_id),
+    )
+    .await
+    .map_err(|_| "连接灯板超时，请确认设备未被其他客户端占用".to_string())??;
+    *state.windows_connection.lock().await = Some(connection.clone());
+    Ok(connection)
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 fn status_scan_filter() -> Result<ScanFilter, String> {
     // Windows' Bluetooth stack does not reliably expose 128-bit advertised
     // services to the WinRT watcher filter. Scan broadly there, then keep the
@@ -335,7 +386,7 @@ fn status_scan_filter() -> Result<ScanFilter, String> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 fn device_id_from_name(name: &str) -> Option<String> {
     let start = name.find(DEVICE_PREFIX)? + DEVICE_PREFIX.len();
     let device_id: String = name[start..].chars().take(6).collect();
@@ -343,7 +394,7 @@ fn device_id_from_name(name: &str) -> Option<String> {
         .then(|| device_id.to_ascii_uppercase())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 fn characteristic(peripheral: &BlePeripheral, uuid: &str) -> Result<Characteristic, String> {
     let uuid = Uuid::parse_str(uuid).map_err(|error| error.to_string())?;
     peripheral
@@ -353,7 +404,7 @@ fn characteristic(peripheral: &BlePeripheral, uuid: &str) -> Result<Characterist
         .ok_or_else(|| "灯板固件缺少所需蓝牙服务".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 async fn wait_for_macos_adapter(
     adapter: &BleAdapter,
     deadline: tokio::time::Instant,
@@ -376,7 +427,7 @@ async fn wait_for_macos_adapter(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 async fn native_adapter(state: &NativeBleState) -> Result<BleAdapter, String> {
     let mut held = state.adapter.lock().await;
     if let Some(adapter) = held.as_ref() {
@@ -401,7 +452,7 @@ async fn native_adapter(state: &NativeBleState) -> Result<BleAdapter, String> {
     Ok(adapter)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 async fn connect_peripheral(
     state: &NativeBleState,
     address: Option<&str>,
@@ -419,6 +470,7 @@ async fn connect_peripheral(
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     let fallback_at = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
     let mut fallback_started = false;
+    let status_service_uuid = Uuid::parse_str(SERVICE_UUID).map_err(|error| error.to_string())?;
     loop {
         for adapter in &adapters {
             for peripheral in adapter
@@ -438,10 +490,17 @@ async fn connect_peripheral(
                         .and_then(device_id_from_name)
                         .is_some_and(|value| value.eq_ignore_ascii_case(expected))
                 });
+                let service_matches = properties.as_ref().is_some_and(|props| {
+                    props.services.iter().any(|value| *value == status_service_uuid)
+                });
                 // CoreBluetooth can report the advertised service before it
                 // reports the scan-response local name. Connect only to this
                 // service-filtered candidate and read the standard GAP name.
-                if !id_matches && !name_matches && device_id.is_some() {
+                if !id_matches
+                    && !name_matches
+                    && device_id.is_some()
+                    && (cfg!(target_os = "macos") || service_matches)
+                {
                     if !peripheral.is_connected().await.unwrap_or(false)
                         && peripheral.connect().await.is_err()
                     {
@@ -508,7 +567,7 @@ async fn connect_peripheral(
     Err("没有发现目标灯板".into())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 async fn discovered_status_boards(
     adapters: &[BleAdapter],
 ) -> Result<(Vec<Value>, usize, usize, usize), String> {
@@ -517,7 +576,6 @@ async fn discovered_status_boards(
     let mut candidates = 0usize;
     let mut unresolved = 0usize;
     let service_uuid = Uuid::parse_str(SERVICE_UUID).map_err(|error| error.to_string())?;
-    let name_uuid = Uuid::parse_str(GAP_DEVICE_NAME_UUID).map_err(|error| error.to_string())?;
     for adapter in adapters {
         let peripherals = adapter
             .peripherals()
@@ -537,37 +595,19 @@ async fn discovered_status_boards(
                 .services
                 .iter()
                 .any(|value| *value == service_uuid);
-            let mut device_id = advertised_name.as_deref().and_then(device_id_from_name);
+            let device_id = advertised_name.as_deref().and_then(device_id_from_name);
             if service_matches || device_id.is_some() {
                 candidates += 1;
             }
-            let mut resolved_name = advertised_name;
+            let resolved_name = advertised_name;
             if device_id.is_none() && service_matches {
-                let was_connected = peripheral.is_connected().await.unwrap_or(false);
-                if (was_connected || peripheral.connect().await.is_ok())
-                    && peripheral.discover_services().await.is_ok()
-                {
-                    if let Some(name_characteristic) = peripheral
-                        .characteristics()
-                        .into_iter()
-                        .find(|item| item.uuid == name_uuid)
-                    {
-                        if let Ok(bytes) = peripheral.read(&name_characteristic).await {
-                            if let Ok(name) = String::from_utf8(bytes) {
-                                device_id = device_id_from_name(&name);
-                                resolved_name = Some(name);
-                            }
-                        }
-                    }
-                }
-                if !was_connected {
-                    let _ = peripheral.disconnect().await;
-                }
+                // Never connect while scanning. Windows may retain stale BLE
+                // peripherals whose connection attempts block for many seconds.
+                // The board name is present in the scan response and a later
+                // polling pass can resolve it without delaying other devices.
+                unresolved += 1;
             }
             let Some(device_id) = device_id else {
-                if service_matches {
-                    unresolved += 1;
-                }
                 continue;
             };
             if devices
@@ -925,7 +965,29 @@ async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, St
         .await;
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let mut devices = windows_ble::scan(4).await?;
+        let connection = ble.windows_connection.lock().await.clone();
+        let mut addresses = ble.windows_addresses.lock().await;
+        addresses.clear();
+        for device in &mut devices {
+            addresses.insert(device.device_id.clone(), device.address.clone());
+            device.connected = connection.as_ref().is_some_and(|current| {
+                current.is_connected() && current.device_id.eq_ignore_ascii_case(&device.device_id)
+            });
+        }
+        drop(addresses);
+        return Ok(serde_json::json!({
+            "observed_count": devices.len(),
+            "candidate_count": devices.len(),
+            "unresolved_count": 0,
+            "devices": devices,
+            "connection": connection_status_value(ble.inner()).await?,
+        }));
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         // The Tauri process owns Bluetooth on both platforms. On macOS this makes
         // the permission request belong to the signed Beacon app instead of a
@@ -964,7 +1026,7 @@ async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, St
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let found = discovered_status_boards(&adapters).await?;
-            if !found.0.is_empty() || tokio::time::Instant::now() >= deadline {
+            if tokio::time::Instant::now() >= deadline {
                 break found;
             }
         };
@@ -996,8 +1058,8 @@ async fn identify_device(
     address: Option<String>,
     device_id: Option<String>,
 ) -> Result<Value, String> {
-    let _foreground = ForegroundGuard::new(state.inner());
-    let _connection = state.write_lock.lock().await;
+    let foreground = ForegroundGuard::new(state.inner());
+    let connection = state.write_lock.clone().lock_owned().await;
     let address = address.filter(|value| !value.trim().is_empty());
     let device_id = device_id.filter(|value| !value.trim().is_empty());
     if address.is_none() && device_id.is_none() {
@@ -1025,7 +1087,30 @@ async fn identify_device(
             "connection": connection,
         }));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let target_id = device_id.as_deref().ok_or("识别目标缺少唯一 ID")?;
+        let native = windows_connection_for(state.inner(), address.as_deref(), target_id).await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(IDENTIFY_IO_TIMEOUT_SECS),
+            native.write_control(&[0xC3, 1, 4, 0], true),
+        )
+        .await
+        .map_err(|_| "发送识别动画超时".to_string())??;
+        *state.connected_device_id.lock().await = Some(target_id.to_ascii_uppercase());
+        let background_state = state.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            let _foreground = foreground;
+            let _connection = connection;
+            tokio::time::sleep(std::time::Duration::from_millis(IDENTIFY_WINDOWS_HOLD_MS)).await;
+            start_heartbeat(background_state);
+        });
+        return Ok(serde_json::json!({
+            "ok": true,
+            "connection": connection_status_value(state.inner()).await?,
+        }));
+    }
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         let connected_device_id = state.connected_device_id.lock().await.clone();
         let (peripheral, reused_connection) = {
@@ -1044,44 +1129,51 @@ async fn identify_device(
                 {
                     (item, true)
                 }
-                _ => (
-                    connect_peripheral(
-                        state.inner(),
-                        address.as_deref(),
-                        device_id.as_deref(),
+                _ => {
+                    let peripheral = tokio::time::timeout(
+                        std::time::Duration::from_secs(IDENTIFY_CONNECT_TIMEOUT_SECS),
+                        connect_peripheral(
+                            state.inner(),
+                            address.as_deref(),
+                            device_id.as_deref(),
+                        ),
                     )
-                    .await?,
-                    false,
-                ),
+                    .await
+                    .map_err(|_| "连接灯板超时，请重新扫描后再试".to_string())??;
+                    (peripheral, false)
+                }
             }
         };
         let control = characteristic(&peripheral, CONTROL_UUID)?;
-        let started_at = tokio::time::Instant::now();
-        loop {
-            peripheral
-                .write(&control, &[0xC3, 1, 4, 0], WriteType::WithResponse)
-                .await
-                .map_err(|error| format!("发送识别动画失败：{error}"))?;
-            let remaining = std::time::Duration::from_millis(IDENTIFY_ANIMATION_HOLD_MS)
-                .saturating_sub(started_at.elapsed());
-            if remaining <= std::time::Duration::from_millis(IDENTIFY_RETRY_INTERVAL_MS) {
-                tokio::time::sleep(remaining).await;
-                break;
-            }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(IDENTIFY_IO_TIMEOUT_SECS),
+            peripheral.write(&control, &[0xC3, 1, 4, 0], WriteType::WithResponse),
+        )
+        .await
+        .map_err(|_| "发送识别动画超时".to_string())?
+        .map_err(|error| format!("发送识别动画失败：{error}"))?;
+        // Return to the UI as soon as the command is acknowledged, while a
+        // background guard protects the firmware's three-second animation from
+        // dashboard refreshes. Disconnecting is also kept off the UI path.
+        let background_state = state.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            let _foreground = foreground;
+            let _connection = connection;
             tokio::time::sleep(std::time::Duration::from_millis(
-                IDENTIFY_RETRY_INTERVAL_MS,
+                IDENTIFY_WINDOWS_HOLD_MS,
             ))
             .await;
-        }
-        if reused_connection {
-            *state.peripheral.lock().await = Some(peripheral);
-            start_heartbeat(state.inner().clone());
-        } else {
-            peripheral
-                .disconnect()
-                .await
-                .map_err(|error| format!("识别完成但断开失败：{error}"))?;
-        }
+            if reused_connection {
+                *background_state.peripheral.lock().await = Some(peripheral);
+                start_heartbeat(background_state);
+            } else {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(IDENTIFY_IO_TIMEOUT_SECS),
+                    peripheral.disconnect(),
+                )
+                .await;
+            }
+        });
         let connection = connection_status_value(state.inner()).await?;
         if connection
             .get("connected")
@@ -1167,7 +1259,23 @@ async fn disconnect_device(
             "connection": connection_status_value(state.inner()).await?,
         }));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        if let Some(connection) = state.windows_connection.lock().await.take() {
+            if let Err(error) = connection.close() {
+                *state.windows_connection.lock().await = Some(connection);
+                state.manual_disconnect.store(was_manually_disconnected, Ordering::SeqCst);
+                return Err(format!("断开灯板失败：{error}"));
+            }
+        }
+        *state.connected_device_id.lock().await = None;
+        *state.last_dashboard.lock().await = None;
+        return Ok(serde_json::json!({
+            "ok": true,
+            "connection": connection_status_value(state.inner()).await?,
+        }));
+    }
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         let peripheral = state.peripheral.lock().await.take();
         if let Some(peripheral) = peripheral {
@@ -1217,7 +1325,40 @@ async fn connection_status_value(state: &NativeBleState) -> Result<Value, String
         }
         return Ok(status);
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let connection = state.windows_connection.lock().await.clone();
+        let connected = connection.as_ref().is_some_and(windows_ble::Connection::is_connected);
+        let (device_id, address, firmware) = if connected {
+            let current = connection.as_ref().unwrap();
+            let info = tokio::time::timeout(
+                std::time::Duration::from_secs(DEVICE_WRITE_TIMEOUT_SECS),
+                current.read_info(),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok);
+            (Some(current.device_id.clone()), Some(current.address.clone()), info)
+        } else {
+            (None, None, None)
+        };
+        *state.connected_device_id.lock().await = device_id.clone();
+        let (firmware_version, partition, build_date, build_time) = firmware
+            .as_deref()
+            .map(windows_ble::parse_firmware_info)
+            .unwrap_or_default();
+        return Ok(serde_json::json!({
+            "connected": connected,
+            "device_id": device_id,
+            "address": address,
+            "firmware_version": firmware_version,
+            "partition": partition,
+            "build_date": build_date,
+            "build_time": build_time,
+            "manually_disconnected": state.manual_disconnect.load(Ordering::SeqCst),
+        }));
+    }
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         let peripheral = state.peripheral.lock().await.clone();
         let connected = match peripheral.as_ref() {
@@ -1274,7 +1415,51 @@ async fn ota_start(
         });
         return Ok(serde_json::json!({"ok":true,"bytes":firmware_len}));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let scanned_device_id = state
+            .windows_addresses
+            .lock()
+            .await
+            .iter()
+            .find_map(|(id, known_address)| known_address.eq_ignore_ascii_case(&address).then(|| id.clone()));
+        let device_id = scanned_device_id
+            .or(state.connected_device_id.lock().await.clone())
+            .ok_or("本次扫描中没有目标灯板，请重新扫描")?;
+        let native = windows_connection_for(state.inner(), Some(&address), &device_id).await?;
+        let progress = state.ota_progress.clone();
+        let held = state.windows_connection.clone();
+        tauri::async_runtime::spawn(async move {
+            let _foreground = foreground;
+            let _connection = connection;
+            let result: Result<(), String> = async {
+                let size = firmware.len() as u32;
+                native.write_ota(&[1, size as u8, (size >> 8) as u8, (size >> 16) as u8, (size >> 24) as u8]).await?;
+                let mut sent = 0usize;
+                while sent < firmware.len() {
+                    let end = (sent + 240).min(firmware.len());
+                    let mut packet = Vec::with_capacity(end - sent + 1);
+                    packet.push(2);
+                    packet.extend_from_slice(&firmware[sent..end]);
+                    native.write_ota(&packet).await?;
+                    sent = end;
+                    let percent = (sent * 100 / firmware.len()) as u64;
+                    *progress.lock().await = serde_json::json!({"state":"running","progress":percent,"message":"正在写入固件"});
+                }
+                native.write_ota(&[3]).await
+            }.await;
+            match result {
+                Ok(()) => *progress.lock().await = serde_json::json!({"state":"success","progress":100,"message":"固件校验完成，灯板正在重启"}),
+                Err(error) => {
+                    let _ = native.write_ota(&[4]).await;
+                    *progress.lock().await = serde_json::json!({"state":"error","progress":0,"message":format!("固件升级失败：{error}")});
+                }
+            }
+            *held.lock().await = Some(native);
+        });
+        return Ok(serde_json::json!({"ok":true,"bytes":firmware_len}));
+    }
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         let peripheral = {
             let held = state.peripheral.lock().await;
@@ -1403,7 +1588,36 @@ async fn native_apply(
         start_heartbeat(ble.clone());
         return Ok(prepared);
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let native = windows_connection_for(&ble, None, &device_id).await?;
+        let _connection = (explicit_connection, background_connection);
+        let decoded = packets
+            .iter()
+            .map(|encoded| {
+                let value = encoded.as_str().ok_or("配置数据格式无效")?;
+                BASE64.decode(value).map_err(|_| "配置数据格式无效".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for bytes in &decoded {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(DEVICE_WRITE_TIMEOUT_SECS),
+                native.write_control(bytes, true),
+            )
+            .await
+            .map_err(|_| "配置下发超时".to_string())?;
+            if let Err(error) = result {
+                if bytes.get(2) != Some(&0x0C) {
+                    return Err(format!("配置下发失败：{error}"));
+                }
+            }
+        }
+        *ble.windows_connection.lock().await = Some(native);
+        *ble.connected_device_id.lock().await = Some(device_id);
+        start_heartbeat(ble.clone());
+        return Ok(prepared);
+    }
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         let held = ble.peripheral.lock().await.clone();
         let connected_device_id = ble.connected_device_id.lock().await.clone();
@@ -1418,11 +1632,25 @@ async fn native_apply(
             }
             Some(item) => {
                 if item.is_connected().await.unwrap_or(false) {
-                    let _ = item.disconnect().await;
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(DEVICE_WRITE_TIMEOUT_SECS),
+                        item.disconnect(),
+                    )
+                    .await;
                 }
-                connect_peripheral(&ble, None, Some(&device_id)).await?
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(DEVICE_CONNECT_TIMEOUT_SECS),
+                    connect_peripheral(&ble, None, Some(&device_id)),
+                )
+                .await
+                .map_err(|_| "连接灯板超时，请确认设备未被其他客户端占用".to_string())??
             }
-            None => connect_peripheral(&ble, None, Some(&device_id)).await?,
+            None => tokio::time::timeout(
+                std::time::Duration::from_secs(DEVICE_CONNECT_TIMEOUT_SECS),
+                connect_peripheral(&ble, None, Some(&device_id)),
+            )
+            .await
+            .map_err(|_| "连接灯板超时，请确认设备未被其他客户端占用".to_string())??,
         };
         let control = characteristic(&peripheral, CONTROL_UUID)?;
         let _connection = (explicit_connection, background_connection);
@@ -1436,9 +1664,12 @@ async fn native_apply(
             })
             .collect::<Result<Vec<_>, _>>()?;
         for bytes in &decoded {
-            let result = peripheral
-                .write(&control, bytes, WriteType::WithResponse)
-                .await;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(DEVICE_WRITE_TIMEOUT_SECS),
+                peripheral.write(&control, bytes, WriteType::WithResponse),
+            )
+            .await
+            .map_err(|_| "配置下发超时".to_string())?;
             // System brightness (0x0C) is optional for compatibility with boards
             // running firmware released before that command was introduced.
             if let Err(error) = result {
@@ -1484,7 +1715,34 @@ fn start_heartbeat(ble: NativeBleState) {
                 }
                 continue;
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(windows)]
+            {
+                let connection = ble.windows_connection.lock().await.clone();
+                let Some(connection) = connection else { break };
+                if !connection.is_connected() {
+                    *ble.windows_connection.lock().await = None;
+                    *ble.connected_device_id.lock().await = None;
+                    *ble.last_dashboard.lock().await = None;
+                    break;
+                }
+                let sequence = ble.sequence.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+                let _guard = ble.write_lock.lock().await;
+                if ble.foreground_operations.load(Ordering::SeqCst) > 0 {
+                    continue;
+                }
+                if connection
+                    .write_control(&[0xC3, 1, 1, sequence], false)
+                    .await
+                    .is_err()
+                {
+                    *ble.windows_connection.lock().await = None;
+                    *ble.connected_device_id.lock().await = None;
+                    *ble.last_dashboard.lock().await = None;
+                    break;
+                }
+                continue;
+            }
+            #[cfg(all(not(target_os = "macos"), not(windows)))]
             {
                 let peripheral = ble.peripheral.lock().await.clone();
                 let Some(peripheral) = peripheral else { break };
@@ -1576,11 +1834,12 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_scans_without_service_filter() {
-        assert!(status_scan_filter()
-            .expect("Windows scan filter")
-            .services
-            .is_empty());
+    fn windows_parses_live_firmware_info_into_columns() {
+        let parsed = windows_ble::parse_firmware_info("1.2.3|ota_1|Aug 26 2026 20:15:10");
+        assert_eq!(parsed.0.as_deref(), Some("1.2.3"));
+        assert_eq!(parsed.1.as_deref(), Some("ota_1"));
+        assert_eq!(parsed.2.as_deref(), Some("Aug 26 2026"));
+        assert_eq!(parsed.3.as_deref(), Some("20:15:10"));
     }
 }
 

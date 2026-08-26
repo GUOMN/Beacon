@@ -9,6 +9,8 @@ static bool s_state_style_valid[PANEL_STATE_ERROR + 1U];
 static led_status_t s_state_styles[PANEL_STATE_ERROR + 1U];
 static led_effect_t s_system_effect = LED_EFFECT_DOUBLE_BLINK;
 static uint8_t s_system_brightness_percent = 100U;
+static uint8_t s_remaining_percent = 100U;
+static uint8_t s_period_used_percent = 0U;
 
 // 上位机不覆盖动画参数时采用的固件默认值。
 #define DEFAULT_TASK_ANIMATION_PERIOD_MS 1200U
@@ -246,6 +248,9 @@ esp_err_t dashboard_status_set_usage(uint8_t remaining_percent,
     ESP_RETURN_ON_FALSE(remaining_percent <= 100U && period_used_percent <= 100U,
                         ESP_ERR_INVALID_ARG, "dashboard", "用量百分比无效");
 
+    s_remaining_percent = remaining_percent;
+    s_period_used_percent = period_used_percent;
+
     uint8_t red;
     uint8_t green;
     if (remaining_percent >= 50U) {
@@ -304,6 +309,7 @@ esp_err_t dashboard_status_set_system_brightness(uint8_t brightness_percent)
     nvs_close(handle);
     if (result == ESP_OK) {
         s_system_brightness_percent = brightness_percent;
+        result = dashboard_status_set_usage(s_remaining_percent, s_period_used_percent);
     }
     return result;
 }

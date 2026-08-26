@@ -413,6 +413,7 @@ dependencies = [
  "tauri-nspanel",
  "tokio",
  "uuid",
+ "windows 0.62.2",
 ]
 
 [[package]]
