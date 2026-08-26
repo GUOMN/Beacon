@@ -124,7 +124,7 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
 
     private func identify(_ request: [String: Any], completion: @escaping ([String: Any]) -> Void) {
         let target = target(from: request)
-        let holdSeconds = max(0, (request["hold_ms"] as? NSNumber)?.doubleValue ?? 3200) / 1000
+        let holdSeconds = max(0, (request["hold_ms"] as? NSNumber)?.doubleValue ?? 6500) / 1000
         let wasConnected = currentPeripheral().map {
             $0.state == .connected && matches($0, target: target)
         } ?? false
@@ -132,12 +132,34 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
             switch result {
             case .failure(let error): completion(["error": error])
             case .success:
-                self.write([Data([0xC3, 1, 4, 0])], to: self.control) { writeResult in
-                    if case .failure(let error) = writeResult { completion(["error": error]); return }
-                    if wasConnected { completion(["ok": true]); return }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + holdSeconds) {
-                        self.disconnect { result in completion(self.response(result)) }
+                self.repeatIdentify(until: Date().addingTimeInterval(holdSeconds)) { writeResult in
+                    if case .failure(let error) = writeResult {
+                        completion(["error": error]); return
                     }
+                    if wasConnected {
+                        completion(["ok": true]); return
+                    }
+                    self.disconnect {
+                        result in completion(self.response(result))
+                    }
+                }
+            }
+        }
+    }
+
+    private func repeatIdentify(
+        until deadline: Date,
+        completion: @escaping (NativeResult<Void>) -> Void
+    ) {
+        write([Data([0xC3, 1, 4, 0])], to: control) { result in
+            if case .failure = result { completion(result); return }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { completion(.success(())); return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + min(0.75, remaining)) {
+                if deadline.timeIntervalSinceNow > 0 {
+                    self.repeatIdentify(until: deadline, completion: completion)
+                } else {
+                    completion(.success(()))
                 }
             }
         }

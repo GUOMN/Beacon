@@ -50,7 +50,9 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-const IDENTIFY_ANIMATION_HOLD_MS: u64 = 3_200;
+const IDENTIFY_ANIMATION_HOLD_MS: u64 = 6_500;
+#[cfg(not(target_os = "macos"))]
+const IDENTIFY_RETRY_INTERVAL_MS: u64 = 750;
 
 fn bridge_script() -> Result<PathBuf, String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
@@ -1035,18 +1037,27 @@ async fn identify_device(
             }
         };
         let control = characteristic(&peripheral, CONTROL_UUID)?;
-        peripheral
-            .write(&control, &[0xC3, 1, 4, 0], WriteType::WithResponse)
-            .await
-            .map_err(|error| format!("发送识别动画失败：{error}"))?;
+        let started_at = tokio::time::Instant::now();
+        loop {
+            peripheral
+                .write(&control, &[0xC3, 1, 4, 0], WriteType::WithResponse)
+                .await
+                .map_err(|error| format!("发送识别动画失败：{error}"))?;
+            let remaining = std::time::Duration::from_millis(IDENTIFY_ANIMATION_HOLD_MS)
+                .saturating_sub(started_at.elapsed());
+            if remaining <= std::time::Duration::from_millis(IDENTIFY_RETRY_INTERVAL_MS) {
+                tokio::time::sleep(remaining).await;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(
+                IDENTIFY_RETRY_INTERVAL_MS,
+            ))
+            .await;
+        }
         if reused_connection {
             *state.peripheral.lock().await = Some(peripheral);
             start_heartbeat(state.inner().clone());
         } else {
-            tokio::time::sleep(std::time::Duration::from_millis(
-                IDENTIFY_ANIMATION_HOLD_MS,
-            ))
-            .await;
             peripheral
                 .disconnect()
                 .await
