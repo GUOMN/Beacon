@@ -21,10 +21,23 @@ from codex_status_core.custom_source import (
 from codex_status_core.hook_manager import HookProvider, install, status, uninstall
 from codex_status_core.hook_adapter import _hook_payload_failed
 from codex_status_core.models import TaskSlot
-from tauri_bridge import apply_device, data_sources, delete_custom_source, manage_tasks, save_custom_source, set_data_source
+from tauri_bridge import (
+    apply_device, data_sources, delete_custom_source, manage_tasks, save_custom_source,
+    set_data_source, settings, save_settings,
+)
 
 
 class EventPipelineTests(unittest.TestCase):
+    def test_metric_cards_use_existing_settings_and_accept_local_options_only(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            path = Path(folder) / "settings.json"
+            with patch("tauri_bridge._settings_path", return_value=path):
+                result = save_settings({"metric_cards": ["five_hour_tokens", "today_task_count"]})
+                self.assertEqual(result["metric_cards"], ["five_hour_tokens", "today_task_count"])
+                self.assertEqual(settings()["metric_cards"], ["five_hour_tokens", "today_task_count"])
+                with self.assertRaisesRegex(ValueError, "最多"):
+                    save_settings({"metric_cards": ["five_hour_tokens", "seven_day_tokens", "system_busy", "today_task_count"]})
+
     def test_connect_target_does_not_change_saved_binding_before_validation(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             settings_path = Path(folder) / "settings.json"

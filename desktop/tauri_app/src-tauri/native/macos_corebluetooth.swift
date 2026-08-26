@@ -510,7 +510,15 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         guard writeCompletion != nil else { return }
-        if let error { finishWrite(.failure("蓝牙写入失败：\(error.localizedDescription)")); return }
+        if let error {
+            // 0x0C was added after the first firmware release. Older boards reject
+            // it at the ATT layer; keep sending the core panel/task state packets.
+            let packet = writeIndex < writePackets.count ? writePackets[writeIndex] : Data()
+            let isOptionalSystemBrightness = packet.count >= 3 && packet[2] == 0x0C
+            if !isOptionalSystemBrightness {
+                finishWrite(.failure("蓝牙写入失败：\(error.localizedDescription)")); return
+            }
+        }
         writeIndex += 1
         if writeIndex >= writePackets.count { finishWrite(.success(())) }
         else if let writeCharacteristic {

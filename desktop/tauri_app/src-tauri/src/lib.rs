@@ -1436,10 +1436,16 @@ async fn native_apply(
             })
             .collect::<Result<Vec<_>, _>>()?;
         for bytes in &decoded {
-            peripheral
+            let result = peripheral
                 .write(&control, bytes, WriteType::WithResponse)
-                .await
-                .map_err(|error| format!("配置下发失败：{error}"))?;
+                .await;
+            // System brightness (0x0C) is optional for compatibility with boards
+            // running firmware released before that command was introduced.
+            if let Err(error) = result {
+                if bytes.get(2) != Some(&0x0C) {
+                    return Err(format!("配置下发失败：{error}"));
+                }
+            }
         }
         *ble.peripheral.lock().await = Some(peripheral);
         *ble.connected_device_id.lock().await = Some(device_id);

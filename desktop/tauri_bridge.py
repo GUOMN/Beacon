@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import sys
 import base64
+import sqlite3
+import time
 from pathlib import Path
 try:
     import psutil
@@ -34,6 +36,13 @@ _custom_registry = CustomSourceRegistry()
 _custom_supervisor: CustomSourceSupervisor | None = None
 _runtime_store: StatusEventStore | None = None
 _codex_source: CodexSessionSource | None = None
+_legacy_remote_data_purged = False
+_METRIC_CARD_OPTIONS = {
+    "five_hour_tokens": ("5 小时 Token", "本机 SQLite task_usage 近 5 小时累计"),
+    "seven_day_tokens": ("7 天 Token", "本机 SQLite task_usage 近 7 天累计"),
+    "system_busy": ("系统繁忙程度", "本机任务、Token 与系统资源加权计算"),
+    "today_task_count": ("今日任务数", "本机 SQLite task_events 今日去重任务数"),
+}
 
 
 def _sync_codex_source(enabled: bool) -> None:
@@ -89,13 +98,48 @@ def dashboard() -> dict[str, object]:
             "busy_percent": busy,
             "five_hour_tokens": five_hours,
             "seven_day_tokens": seven_days,
+            "cards": dashboard_metric_cards(five_hours, seven_days, busy),
         },
     }
     return result
 
 
+def _today_task_count() -> int:
+    store = StatusEventStore()
+    start_ms = int((time.time() - (time.time() % 86_400)) * 1000)
+    return sum(1 for record in store.latest_records(1000) if int(record.get("first_at") or 0) >= start_ms)
+
+
+def dashboard_metric_cards(five_hours: int, seven_days: int, busy: int) -> list[dict[str, object]]:
+    selected = settings()["metric_cards"]
+    values = {
+        "five_hour_tokens": (str(five_hours), "本机 SQLite task_usage 近 5 小时累计"),
+        "seven_day_tokens": (str(seven_days), "本机 SQLite task_usage 近 7 天累计"),
+        "system_busy": (f"{busy}%", "本机任务与资源加权后写入 SQLite"),
+        "today_task_count": (str(_today_task_count()), "本机 SQLite task_events 今日去重"),
+    }
+    return [{"key": key, "title": _METRIC_CARD_OPTIONS[key][0], "value": values[key][0], "detail": values[key][1]} for key in selected if key in values]
+
+
 def _settings_path() -> Path:
     return app_data_directory() / "settings.json"
+
+
+def _purge_legacy_remote_data(data: dict[str, object]) -> bool:
+    """Remove the discontinued Sub2API configuration and its local tables once."""
+    global _legacy_remote_data_purged
+    changed = data.pop("sub2api_base_url", None) is not None
+    if _legacy_remote_data_purged:
+        return changed
+    _legacy_remote_data_purged = True
+    try:
+        with sqlite3.connect(app_data_directory() / "status-events.sqlite", timeout=2) as database:
+            database.execute("DROP TABLE IF EXISTS service_credentials")
+            database.execute("DROP TABLE IF EXISTS dashboard_metric_cards")
+            database.execute("DROP TABLE IF EXISTS dashboard_metric_snapshots")
+    except sqlite3.Error:
+        pass
+    return changed
 
 
 def settings() -> dict[str, object]:
@@ -103,9 +147,13 @@ def settings() -> dict[str, object]:
         data = json.loads(_settings_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         data = {}
+    if _purge_legacy_remote_data(data):
+        _settings_path().parent.mkdir(parents=True, exist_ok=True)
+        _settings_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     styles = {key: {**value, **data.get("state_styles", {}).get(key, {})} for key, value in DEFAULT_STYLES.items()}
     weights = {key: max(0, min(100, int(data.get("busy_weights", {}).get(key, value)))) for key, value in DEFAULT_BUSY_WEIGHTS.items()}
-    return {"bound_device_id": data.get("bound_device_id"), "brightness": int(data.get("master_brightness", 30)), "system_brightness": int(data.get("system_brightness", 100)), "sleep_minutes": int(data.get("sleep_timeout_minutes", 10)), "led_count": int(data.get("total_led_count", 6)), "output_channels": int(data.get("output_channels", 1)), "styles": styles, "busy_weights": weights, "system_color_source": str(data.get("system_color_source", "账号余量")), "system_effect": int(data.get("system_effect", 4))}
+    metric_cards = [str(value) for value in data.get("metric_cards", []) if str(value) in _METRIC_CARD_OPTIONS][:3]
+    return {"bound_device_id": data.get("bound_device_id"), "brightness": int(data.get("master_brightness", 30)), "system_brightness": int(data.get("system_brightness", 100)), "sleep_minutes": int(data.get("sleep_timeout_minutes", 10)), "led_count": int(data.get("total_led_count", 6)), "output_channels": int(data.get("output_channels", 1)), "styles": styles, "busy_weights": weights, "system_color_source": str(data.get("system_color_source", "账号余量")), "system_effect": int(data.get("system_effect", 4)), "metric_cards": metric_cards}
 
 
 def save_settings(payload: dict[str, object]) -> dict[str, object]:
@@ -114,8 +162,14 @@ def save_settings(payload: dict[str, object]) -> dict[str, object]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         data = {}
-    for key in ("bound_device_id", "master_brightness", "system_brightness", "sleep_timeout_minutes", "total_led_count", "output_channels", "state_styles", "busy_weights", "system_color_source", "system_effect"):
+    for key in ("bound_device_id", "master_brightness", "system_brightness", "sleep_timeout_minutes", "total_led_count", "output_channels", "state_styles", "busy_weights", "system_color_source", "system_effect", "metric_cards"):
         if key in payload:
+            if key == "metric_cards":
+                cards = [str(value) for value in payload[key] if str(value) in _METRIC_CARD_OPTIONS] if isinstance(payload[key], list) else []
+                if len(cards) > 3 or len(cards) != len(set(cards)):
+                    raise ValueError("指标卡最多可选择 3 张且不能重复")
+                data[key] = cards
+                continue
             data[key] = payload[key]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
