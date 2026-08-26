@@ -56,33 +56,44 @@ jobs:
         working-directory: desktop/tauri_app
         run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles nsis
 
-      - name: Build Windows portable archive
+      - name: Prepare flat Windows packages
         shell: pwsh
         run: |
           $release = "desktop/tauri_app/src-tauri/target/x86_64-pc-windows-msvc/release"
+          $packages = "artifacts/windows"
           $portable = "artifacts/windows/Beacon-Windows-x64-Portable"
           New-Item -ItemType Directory -Force $portable | Out-Null
           Copy-Item "$release/codex-status-bridge.exe" "$portable/Beacon.exe"
+          Copy-Item "$release/binaries/bridge-x86_64.exe" "$portable/bridge-x86_64.exe"
           @'
           Beacon portable edition
 
-          This edition does not include the Python backend. It uses the Python
-          runtime and Python dependencies already installed on this Windows PC.
+          This package is self-contained. Keep Beacon.exe and
+          bridge-x86_64.exe in the same directory.
 
           Requirements:
           - Windows 10/11 with Microsoft Edge WebView2 Runtime
-          - Python 3.11+ available on PATH
-          - Dependencies: python -m pip install -r desktop/requirements.txt
 
-          For a self-contained installation, use Beacon-Windows-x64-Setup.exe.
+          To install Beacon system-wide, use Beacon-Windows-x64-Setup.exe.
           '@ | Set-Content -Encoding utf8 "$portable/README.txt"
-          Compress-Archive -Path "$portable/*" -DestinationPath "artifacts/windows/Beacon-Windows-x64-Portable.zip" -Force
+          Compress-Archive -Path "$portable/*" -DestinationPath "$packages/Beacon-Windows-x64-Portable.zip" -Force
 
-      - uses: actions/upload-artifact@v4
+          $installer = Get-ChildItem "$release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $installer) { throw "NSIS setup installer was not generated" }
+          Copy-Item $installer.FullName "$packages/Beacon-Windows-x64-Setup.exe"
+
+      - name: Upload portable package
+        uses: actions/upload-artifact@v4
         with:
-          name: Beacon-Windows-x64-Packages
-          path: |
-            desktop/tauri_app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-            artifacts/windows/Beacon-Windows-x64-Portable.zip
+          name: Beacon-Windows-x64-Portable
+          path: artifacts/windows/Beacon-Windows-x64-Portable.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload setup installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Beacon-Windows-x64-Setup
+          path: artifacts/windows/Beacon-Windows-x64-Setup.exe
           if-no-files-found: error
           retention-days: 14
