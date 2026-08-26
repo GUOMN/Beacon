@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from codex_status_core.event_store import StatusEventStore
+from codex_status_core.event_store import BridgeSnapshot, StatusEventStore
 from codex_status_core.codex_session_source import CodexSessionSource
 from codex_status_core.custom_source import (
     CustomSourceRegistry,
@@ -20,10 +20,27 @@ from codex_status_core.custom_source import (
 )
 from codex_status_core.hook_manager import HookProvider, install, status, uninstall
 from codex_status_core.hook_adapter import _hook_payload_failed
-from tauri_bridge import data_sources, delete_custom_source, manage_tasks, save_custom_source, set_data_source
+from codex_status_core.models import TaskSlot
+from tauri_bridge import apply_device, data_sources, delete_custom_source, manage_tasks, save_custom_source, set_data_source
 
 
 class EventPipelineTests(unittest.TestCase):
+    def test_connect_target_does_not_change_saved_binding_before_validation(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            settings_path = Path(folder) / "settings.json"
+            settings_path.write_text(json.dumps({"bound_device_id": "OLD001"}), encoding="utf-8")
+            store = Mock()
+            store.snapshot.return_value = BridgeSnapshot(
+                tasks=[TaskSlot("空闲") for _ in range(5)], busy_percent=0
+            )
+            store.usage_totals.return_value = (0, 0)
+            with patch("tauri_bridge._settings_path", return_value=settings_path), patch(
+                "tauri_bridge.StatusEventStore", return_value=store
+            ):
+                result = apply_device({"target_device_id": "NEW002", "_native_transport": True})
+            self.assertEqual(result["device_id"], "NEW002")
+            self.assertEqual(json.loads(settings_path.read_text(encoding="utf-8"))["bound_device_id"], "OLD001")
+
     def test_custom_source_registry_stays_in_local_config_file(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             path = Path(folder) / "custom-sources.json"

@@ -240,7 +240,9 @@ def apply_device(payload: dict[str, object]) -> dict[str, object]:
     elif payload.get("preview") is False:
         _preview_payload = None
     current = save_settings(payload)
-    device_id = str(current.get("bound_device_id") or "")
+    # An explicit connect validates and configures the target before persisting
+    # it as the bound board. Background updates continue to use the saved ID.
+    device_id = str(payload.get("target_device_id") or current.get("bound_device_id") or "")
     if not device_id:
         raise RuntimeError("请先绑定灯板")
     store = StatusEventStore()

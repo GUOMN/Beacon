@@ -80,6 +80,7 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
 
     private var searchToken: UUID?
     private var searchTarget: Target?
+    private var connectionTarget: Target?
     private var connectionCompletion: ((NativeResult<CBPeripheral>) -> Void)?
     private var activePeripheralID: UUID?
     private var connectedDeviceID: String?
@@ -90,6 +91,7 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
     private var writeIndex = 0
     private var writeCharacteristic: CBCharacteristic?
     private var writeCompletion: ((NativeResult<Void>) -> Void)?
+    private var disconnectingPeripheralID: UUID?
     private var disconnectCompletion: ((NativeResult<Void>) -> Void)?
 
     override init() {
@@ -114,9 +116,7 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
         case "disconnect":
             disconnect { result in completion(self.response(result)) }
         case "status":
-            let connected = currentPeripheral()?.state == .connected
-            let reportedDeviceID: Any = connected ? (connectedDeviceID.map { $0 as Any } ?? NSNull()) : NSNull()
-            completion(["connected": connected, "device_id": reportedDeviceID])
+            completion(connectionResponse())
         case "ota": performOTA(request, completion: completion)
         default: completion(["error": "不支持的原生蓝牙命令"])
         }
@@ -128,6 +128,15 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
         let wasConnected = currentPeripheral().map {
             $0.state == .connected && matches($0, target: target)
         } ?? false
+        let previousTarget = currentPeripheral().flatMap { peripheral -> Target? in
+            guard peripheral.state == .connected, !matches(peripheral, target: target) else {
+                return nil
+            }
+            return Target(
+                address: peripheral.identifier.uuidString,
+                deviceID: connectedDeviceID ?? deviceID(from: names[peripheral.identifier])
+            )
+        }
         ensureConnected(target) { result in
             switch result {
             case .failure(let error): completion(["error": error])
@@ -139,8 +148,20 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
                     if wasConnected {
                         completion(["ok": true]); return
                     }
-                    self.disconnect {
-                        result in completion(self.response(result))
+                    self.disconnect { disconnectResult in
+                        if case .failure(let error) = disconnectResult {
+                            completion(["error": error]); return
+                        }
+                        guard let previousTarget else {
+                            completion(["ok": true]); return
+                        }
+                        self.ensureConnected(previousTarget) { restoreResult in
+                            switch restoreResult {
+                            case .success: completion(["ok": true])
+                            case .failure(let error):
+                                completion(["error": "识别完成，但恢复原设备连接失败：\(error)"])
+                            }
+                        }
                     }
                 }
             }
@@ -218,6 +239,20 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
         }
     }
 
+    private func connectionResponse() -> [String: Any] {
+        guard let peripheral = currentPeripheral(), peripheral.state == .connected,
+              control != nil, ota != nil else {
+            return ["connected": false, "device_id": NSNull()]
+        }
+        let resolvedID = connectedDeviceID ?? deviceID(from: names[peripheral.identifier])
+        connectedDeviceID = resolvedID
+        return [
+            "connected": true,
+            "device_id": resolvedID.map { $0 as Any } ?? NSNull(),
+            "address": peripheral.identifier.uuidString,
+        ]
+    }
+
     private func target(from request: [String: Any]) -> Target {
         Target(address: request["address"] as? String, deviceID: request["device_id"] as? String)
     }
@@ -259,6 +294,12 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
                     withServices: nil,
                     options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
                 )
+                if self.currentPeripheral()?.state == .connected {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        guard self.scanToken == token else { return }
+                        self.finishScan()
+                    }
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + min(max(seconds, 3), 30)) {
                     guard self.scanToken == token else { return }
                     self.finishScan()
@@ -295,6 +336,7 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
             "backend": "CoreBluetooth", "state": stateName(central.state), "devices": devices,
             "observed_count": observed.count, "candidate_count": candidates.count,
             "unresolved_count": unresolved.count,
+            "connection": connectionResponse(),
         ])
     }
 
@@ -315,6 +357,13 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
         let serviceMatches = services.contains(beaconService.uuidString.uppercased())
         if serviceMatches || matchedID != nil { candidates.insert(id) }
         if serviceMatches && matchedID == nil { unresolved.insert(id) } else { unresolved.remove(id) }
+
+        if scanCompletion != nil, let token = scanToken, !candidates.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                guard self.scanToken == token else { return }
+                self.finishScan()
+            }
+        }
 
         if let target = searchTarget, matches(peripheral, target: target) {
             searchTarget = nil; searchToken = nil; central.stopScan(); connect(peripheral)
@@ -338,7 +387,24 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
            matches(current, target: target), control != nil, ota != nil {
             completion(.success(current)); return
         }
-        connectionCompletion = completion; control = nil; ota = nil
+        if let current = currentPeripheral(), current.state != .disconnected,
+           !matches(current, target: target) {
+            disconnect { result in
+                switch result {
+                case .failure(let error): completion(.failure(error))
+                case .success: self.beginConnection(target, completion: completion)
+                }
+            }
+            return
+        }
+        beginConnection(target, completion: completion)
+    }
+
+    private func beginConnection(
+        _ target: Target,
+        completion: @escaping (NativeResult<CBPeripheral>) -> Void
+    ) {
+        connectionTarget = target; connectionCompletion = completion; control = nil; ota = nil
         if let peripheral = peripherals.values.first(where: { matches($0, target: target) }) {
             connect(peripheral); return
         }
@@ -352,7 +418,7 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
                     withServices: nil,
                     options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
                 )
-                DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
                     guard self.searchToken == token else { return }
                     self.searchToken = nil; self.searchTarget = nil; self.central.stopScan()
                     self.finishConnection(.failure("没有发现目标灯板"))
@@ -363,6 +429,9 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
 
     private func connect(_ peripheral: CBPeripheral) {
         activePeripheralID = peripheral.identifier
+        if names[peripheral.identifier] == nil, let name = peripheral.name {
+            names[peripheral.identifier] = name
+        }
         peripheral.delegate = self
         if peripheral.state == .connected { peripheral.discoverServices([beaconService]) }
         else { central.connect(peripheral, options: nil) }
@@ -373,14 +442,24 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        if activePeripheralID == peripheral.identifier {
+            activePeripheralID = nil; connectedDeviceID = nil; control = nil; ota = nil
+        }
         finishConnection(.failure("连接灯板失败：\(error?.localizedDescription ?? "未知错误")"))
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         if activePeripheralID == peripheral.identifier {
             activePeripheralID = nil; connectedDeviceID = nil; control = nil; ota = nil
+            if connectionCompletion != nil {
+                finishConnection(.failure("连接过程中灯板已断开"))
+            }
+            if writeCompletion != nil {
+                finishWrite(.failure("写入过程中灯板已断开"))
+            }
         }
-        if let completion = disconnectCompletion {
+        if disconnectingPeripheralID == peripheral.identifier, let completion = disconnectCompletion {
+            disconnectingPeripheralID = nil
             disconnectCompletion = nil
             if let error { completion(.failure("断开灯板失败：\(error.localizedDescription)")) }
             else { completion(.success(())) }
@@ -404,12 +483,16 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
         guard control != nil, ota != nil else {
             finishConnection(.failure("灯板固件缺少控制或升级特征")); return
         }
-        connectedDeviceID = deviceID(from: names[peripheral.identifier]) ?? connectedDeviceID
+        connectedDeviceID = connectionTarget?.deviceID
+            ?? deviceID(from: names[peripheral.identifier])
+            ?? connectedDeviceID
         finishConnection(.success(peripheral))
     }
 
     private func finishConnection(_ result: NativeResult<CBPeripheral>) {
-        let completion = connectionCompletion; connectionCompletion = nil; completion?(result)
+        let completion = connectionCompletion
+        connectionCompletion = nil; connectionTarget = nil
+        completion?(result)
     }
 
     private func write(
@@ -443,12 +526,15 @@ private final class NativeBluetooth: NSObject, CBCentralManagerDelegate, CBPerip
 
     private func disconnect(completion: @escaping (NativeResult<Void>) -> Void) {
         guard let peripheral = currentPeripheral(), peripheral.state != .disconnected else {
-            connectedDeviceID = nil; control = nil; ota = nil; completion(.success(())); return
+            activePeripheralID = nil; connectedDeviceID = nil; control = nil; ota = nil
+            completion(.success(())); return
         }
+        disconnectingPeripheralID = peripheral.identifier
         disconnectCompletion = completion; central.cancelPeripheralConnection(peripheral)
         DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
             guard let pending = self.disconnectCompletion else { return }
-            self.disconnectCompletion = nil; pending(.failure("断开灯板超时"))
+            self.disconnectingPeripheralID = nil; self.disconnectCompletion = nil
+            pending(.failure("断开灯板超时"))
         }
     }
 

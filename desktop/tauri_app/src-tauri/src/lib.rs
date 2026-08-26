@@ -920,7 +920,7 @@ async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, St
     {
         return run_macos_ble_request_async(serde_json::json!({
             "command": "scan",
-            "seconds": 15.0,
+            "seconds": 4.0,
         }))
         .await;
     }
@@ -938,11 +938,14 @@ async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, St
                 let properties = peripheral.properties().await.ok().flatten();
                 return Ok(serde_json::json!({"devices": [{
                     "name": format!("{DEVICE_PREFIX}{device_id}"),
-                    "device_id": device_id,
+                    "device_id": device_id.clone(),
                     "address": peripheral.id().to_string(),
                     "rssi": properties.and_then(|value| value.rssi),
                     "connected": true,
-                }]}));
+                }], "connection": {
+                    "connected": true,
+                    "device_id": device_id,
+                }}));
             }
         }
         let adapters = vec![native_adapter(ble.inner()).await?];
@@ -979,6 +982,10 @@ async fn scan_devices(ble: tauri::State<'_, NativeBleState>) -> Result<Value, St
             "observed_count": observed_count,
             "candidate_count": candidate_count,
             "unresolved_count": unresolved_count,
+            "connection": {
+                "connected": false,
+                "device_id": Value::Null,
+            },
         }))
     }
 }
@@ -998,20 +1005,32 @@ async fn identify_device(
     }
     #[cfg(target_os = "macos")]
     {
-        return run_macos_ble_request_async(serde_json::json!({
+        run_macos_ble_request_async(serde_json::json!({
             "command": "identify",
             "address": address,
             "device_id": device_id,
             "hold_ms": IDENTIFY_ANIMATION_HOLD_MS,
         }))
-        .await;
+        .await?;
+        let connection = connection_status_value(state.inner()).await?;
+        if connection
+            .get("connected")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            *state.last_dashboard.lock().await = None;
+        }
+        return Ok(serde_json::json!({
+            "ok": true,
+            "connection": connection,
+        }));
     }
     #[cfg(not(target_os = "macos"))]
     {
         let connected_device_id = state.connected_device_id.lock().await.clone();
         let (peripheral, reused_connection) = {
-            let held = state.peripheral.lock().await;
-            match held.as_ref() {
+            let held = state.peripheral.lock().await.clone();
+            match held {
                 Some(item)
                     if item.is_connected().await.unwrap_or(false)
                         && (address
@@ -1023,7 +1042,7 @@ async fn identify_device(
                                     .is_some_and(|held_id| held_id.eq_ignore_ascii_case(value))
                             })) =>
                 {
-                    (item.clone(), true)
+                    (item, true)
                 }
                 _ => (
                     connect_peripheral(
@@ -1063,45 +1082,133 @@ async fn identify_device(
                 .await
                 .map_err(|error| format!("识别完成但断开失败：{error}"))?;
         }
-        Ok(serde_json::json!({"ok": true}))
+        let connection = connection_status_value(state.inner()).await?;
+        if connection
+            .get("connected")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            *state.last_dashboard.lock().await = None;
+        }
+        Ok(serde_json::json!({
+            "ok": true,
+            "connection": connection,
+        }))
     }
 }
 
 #[tauri::command]
-async fn disconnect_device(state: tauri::State<'_, NativeBleState>) -> Result<Value, String> {
+async fn connect_device(
+    bridge: tauri::State<'_, BridgeState>,
+    ble: tauri::State<'_, NativeBleState>,
+    device_id: String,
+    mut payload: Value,
+) -> Result<Value, String> {
+    let device_id = device_id.trim().to_ascii_uppercase();
+    if device_id.len() != 6 || !device_id.chars().all(|value| value.is_ascii_hexdigit()) {
+        return Err("设备唯一 ID 无效".into());
+    }
+    let _transaction = ForegroundGuard::new(ble.inner());
+    payload
+        .as_object_mut()
+        .ok_or("连接配置格式无效")?
+        .insert("target_device_id".into(), Value::String(device_id.clone()));
+    let mut applied =
+        native_apply(bridge.inner().clone(), ble.inner().clone(), payload, true).await?;
+    let connection = connection_status_value(ble.inner()).await?;
+    let connected = connection
+        .get("connected")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let connected_device_id = connection.get("device_id").and_then(Value::as_str);
+    if !connected
+        || !connected_device_id
+            .is_some_and(|value| value.eq_ignore_ascii_case(device_id.as_str()))
+    {
+        return Err("蓝牙连接完成，但目标设备状态校验失败".into());
+    }
+    run_bridge_async(
+        bridge.inner().clone(),
+        "save-settings",
+        serde_json::json!({"bound_device_id": device_id}),
+    )
+    .await?;
+    if let Some(object) = applied.as_object_mut() {
+        object.insert("connection".into(), connection);
+    }
+    Ok(applied)
+}
+
+#[tauri::command]
+async fn disconnect_device(
+    state: tauri::State<'_, NativeBleState>,
+    suppress_reconnect: Option<bool>,
+) -> Result<Value, String> {
     let _foreground = ForegroundGuard::new(state.inner());
-    state.manual_disconnect.store(true, Ordering::SeqCst);
+    let was_manually_disconnected = state.manual_disconnect.load(Ordering::SeqCst);
+    state
+        .manual_disconnect
+        .store(suppress_reconnect.unwrap_or(true), Ordering::SeqCst);
     let _guard = state.write_lock.lock().await;
     #[cfg(target_os = "macos")]
     {
-        run_macos_ble_request_async(serde_json::json!({"command": "disconnect"})).await?;
+        if let Err(error) =
+            run_macos_ble_request_async(serde_json::json!({"command": "disconnect"})).await
+        {
+            state
+                .manual_disconnect
+                .store(was_manually_disconnected, Ordering::SeqCst);
+            return Err(error);
+        }
         *state.connected_device_id.lock().await = None;
         *state.last_dashboard.lock().await = None;
-        return Ok(serde_json::json!({"ok":true}));
+        return Ok(serde_json::json!({
+            "ok": true,
+            "connection": connection_status_value(state.inner()).await?,
+        }));
     }
     #[cfg(not(target_os = "macos"))]
     {
         let peripheral = state.peripheral.lock().await.take();
         if let Some(peripheral) = peripheral {
             if peripheral.is_connected().await.unwrap_or(false) {
-                peripheral
-                    .disconnect()
-                    .await
-                    .map_err(|error| format!("断开灯板失败：{error}"))?;
+                if let Err(error) = peripheral.disconnect().await {
+                    *state.peripheral.lock().await = Some(peripheral);
+                    state
+                        .manual_disconnect
+                        .store(was_manually_disconnected, Ordering::SeqCst);
+                    return Err(format!("断开灯板失败：{error}"));
+                }
             }
         }
         *state.connected_device_id.lock().await = None;
         *state.last_dashboard.lock().await = None;
-        Ok(serde_json::json!({"ok":true}))
+        Ok(serde_json::json!({
+            "ok": true,
+            "connection": connection_status_value(state.inner()).await?,
+        }))
     }
 }
 
 #[tauri::command]
 async fn connection_status(state: tauri::State<'_, NativeBleState>) -> Result<Value, String> {
+    connection_status_value(state.inner()).await
+}
+
+async fn connection_status_value(state: &NativeBleState) -> Result<Value, String> {
     #[cfg(target_os = "macos")]
     {
         let mut status =
             run_macos_ble_request_async(serde_json::json!({"command": "status"})).await?;
+        let connected = status
+            .get("connected")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let device_id = status
+            .get("device_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        *state.connected_device_id.lock().await = connected.then_some(device_id).flatten();
         if let Some(object) = status.as_object_mut() {
             object.insert(
                 "manually_disconnected".into(),
@@ -1113,13 +1220,15 @@ async fn connection_status(state: tauri::State<'_, NativeBleState>) -> Result<Va
     #[cfg(not(target_os = "macos"))]
     {
         let peripheral = state.peripheral.lock().await.clone();
-        let connected = match peripheral {
+        let connected = match peripheral.as_ref() {
             Some(item) => item.is_connected().await.unwrap_or(false),
             None => false,
         };
+        let address = connected.then(|| peripheral.as_ref().map(|item| item.id().to_string())).flatten();
         Ok(serde_json::json!({
             "connected": connected,
             "device_id": state.connected_device_id.lock().await.clone(),
+            "address": address,
             "manually_disconnected": state.manual_disconnect.load(Ordering::SeqCst),
         }))
     }
@@ -1296,12 +1405,24 @@ async fn native_apply(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let peripheral = {
-            let held = ble.peripheral.lock().await;
-            match held.as_ref() {
-                Some(item) if item.is_connected().await.unwrap_or(false) => item.clone(),
-                _ => connect_peripheral(&ble, None, Some(&device_id)).await?,
+        let held = ble.peripheral.lock().await.clone();
+        let connected_device_id = ble.connected_device_id.lock().await.clone();
+        let peripheral = match held {
+            Some(item)
+                if item.is_connected().await.unwrap_or(false)
+                    && connected_device_id
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(&device_id)) =>
+            {
+                item
             }
+            Some(item) => {
+                if item.is_connected().await.unwrap_or(false) {
+                    let _ = item.disconnect().await;
+                }
+                connect_peripheral(&ble, None, Some(&device_id)).await?
+            }
+            None => connect_peripheral(&ble, None, Some(&device_id)).await?,
         };
         let control = characteristic(&peripheral, CONTROL_UUID)?;
         let _connection = (explicit_connection, background_connection);
@@ -1750,6 +1871,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_dashboard,
             scan_devices,
+            connect_device,
             identify_device,
             disconnect_device,
             connection_status,
