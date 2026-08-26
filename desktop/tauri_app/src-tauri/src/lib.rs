@@ -1090,20 +1090,47 @@ async fn identify_device(
     #[cfg(windows)]
     {
         let target_id = device_id.as_deref().ok_or("识别目标缺少唯一 ID")?;
-        let native = windows_connection_for(state.inner(), address.as_deref(), target_id).await?;
+        let persistent = state.windows_connection.lock().await.clone();
+        let (native, reused_connection) = match persistent {
+            Some(current)
+                if current.is_connected()
+                    && current.device_id.eq_ignore_ascii_case(target_id) =>
+            {
+                (current, true)
+            }
+            _ => {
+                let transient_address = match address.as_deref().filter(|value| !value.trim().is_empty()) {
+                    Some(value) => value.to_string(),
+                    None => state
+                        .windows_addresses
+                        .lock()
+                        .await
+                        .get(&target_id.to_ascii_uppercase())
+                        .cloned()
+                        .ok_or("本次扫描中没有识别目标，请重新扫描")?,
+                };
+                let transient = tokio::time::timeout(
+                    std::time::Duration::from_secs(IDENTIFY_CONNECT_TIMEOUT_SECS),
+                    windows_ble::connect(&transient_address, target_id),
+                )
+                .await
+                .map_err(|_| "发送识别指令超时，请重新扫描后再试".to_string())??;
+                (transient, false)
+            }
+        };
         tokio::time::timeout(
             std::time::Duration::from_secs(IDENTIFY_IO_TIMEOUT_SECS),
             native.write_control(&[0xC3, 1, 4, 0], true),
         )
         .await
         .map_err(|_| "发送识别动画超时".to_string())??;
-        *state.connected_device_id.lock().await = Some(target_id.to_ascii_uppercase());
-        let background_state = state.inner().clone();
         tauri::async_runtime::spawn(async move {
             let _foreground = foreground;
             let _connection = connection;
             tokio::time::sleep(std::time::Duration::from_millis(IDENTIFY_WINDOWS_HOLD_MS)).await;
-            start_heartbeat(background_state);
+            if !reused_connection {
+                let _ = native.close();
+            }
         });
         return Ok(serde_json::json!({
             "ok": true,
