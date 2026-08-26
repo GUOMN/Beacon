@@ -32,8 +32,9 @@ jobs:
             idf.py build &&
             mkdir -p artifacts &&
             cp build/ws2812_status.bin artifacts/ws2812-status-ota.bin &&
+            cd build &&
             esptool.py --chip esp32c3 merge_bin
-            -o artifacts/ws2812-status-direct-flash.bin @build/flash_args
+            -o ../artifacts/ws2812-status-direct-flash.bin @flash_args
 
       - name: Upload firmware packages
         uses: actions/upload-artifact@v4
