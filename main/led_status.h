@@ -37,7 +37,6 @@ typedef struct {
 esp_err_t led_status_start(led_strip_handle_t primary_strip,
                            led_strip_handle_t secondary_strip,
                            uint8_t channel_count);
-esp_err_t led_status_set_channel_count(uint8_t channel_count);
 uint8_t led_status_get_channel_count(void);
 
 // 设置或读取指定灯珠的状态，灯珠编号为 0~5

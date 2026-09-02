@@ -126,10 +126,11 @@ esp_err_t led_status_start(led_strip_handle_t primary_strip,
                            led_strip_handle_t secondary_strip,
                            uint8_t channel_count)
 {
-    ESP_RETURN_ON_FALSE(primary_strip != NULL && secondary_strip != NULL,
-                        ESP_ERR_INVALID_ARG, TAG, "灯带句柄为空");
     ESP_RETURN_ON_FALSE(channel_count >= 1U && channel_count <= 2U,
                         ESP_ERR_INVALID_ARG, TAG, "灯带通道数无效");
+    ESP_RETURN_ON_FALSE(primary_strip != NULL &&
+                            (channel_count == 1U || secondary_strip != NULL),
+                        ESP_ERR_INVALID_ARG, TAG, "灯带句柄为空");
     ESP_RETURN_ON_FALSE(s_status_mutex == NULL, ESP_ERR_INVALID_STATE, TAG, "显示任务已启动");
 
     s_strips[0] = primary_strip;
@@ -154,24 +155,6 @@ esp_err_t led_status_start(led_strip_handle_t primary_strip,
     BaseType_t created = xTaskCreate(render_task, "led_renderer", 4096, NULL, 5, NULL);
     ESP_RETURN_ON_FALSE(created == pdPASS, ESP_ERR_NO_MEM, TAG, "无法创建显示任务");
     ESP_LOGI(TAG, "六灯独立状态渲染已启动");
-    return ESP_OK;
-}
-
-esp_err_t led_status_set_channel_count(uint8_t channel_count)
-{
-    ESP_RETURN_ON_FALSE(channel_count >= 1U && channel_count <= 2U,
-                        ESP_ERR_INVALID_ARG, TAG, "灯带通道数无效");
-    if (s_status_mutex != NULL) {
-        xSemaphoreTake(s_status_mutex, portMAX_DELAY);
-    }
-    const uint8_t previous = s_channel_count;
-    s_channel_count = channel_count;
-    if (s_status_mutex != NULL) {
-        xSemaphoreGive(s_status_mutex);
-    }
-    if (previous == 2U && channel_count == 1U && s_strips[1] != NULL) {
-        ESP_ERROR_CHECK(led_strip_clear(s_strips[1]));
-    }
     return ESP_OK;
 }
 

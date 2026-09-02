@@ -45,17 +45,25 @@ void app_main(void)
     led_strip_rmt_config_t rmt_config = {
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = STATUS_RMT_RESOLUTION_HZ,
-        .mem_block_symbols = STATUS_RMT_MEMORY_SYMBOLS,
+        .mem_block_symbols = saved_channels == 1U
+                                 ? STATUS_RMT_SINGLE_CHANNEL_MEMORY_SYMBOLS
+                                 : STATUS_RMT_DUAL_CHANNEL_MEMORY_SYMBOLS,
         .flags.with_dma = false,
     };
 
     led_strip_handle_t strip = NULL;
     led_strip_handle_t secondary_strip = NULL;
     ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &strip));
-    strip_config.strip_gpio_num = STATUS_SECONDARY_DATA_GPIO;
-    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &secondary_strip));
     ESP_ERROR_CHECK(led_strip_clear(strip));
-    ESP_ERROR_CHECK(led_strip_clear(secondary_strip));
+    if (saved_channels == 2U) {
+        strip_config.strip_gpio_num = STATUS_SECONDARY_DATA_GPIO;
+        ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config,
+                                                 &secondary_strip));
+        ESP_ERROR_CHECK(led_strip_clear(secondary_strip));
+    }
+
+    ESP_LOGI(TAG, "RMT 已按 %u 路输出初始化，每路 %u symbols", saved_channels,
+             (unsigned int)rmt_config.mem_block_symbols);
 
     /*
      * 上电硬件自检：绕过蓝牙与状态逻辑，直接把六颗灯点为低亮度白色。
@@ -73,6 +81,9 @@ void app_main(void)
     }
     vTaskDelay(pdMS_TO_TICKS(STATUS_POWER_ON_TEST_MS));
     ESP_ERROR_CHECK(led_strip_clear(strip));
+    if (secondary_strip != NULL) {
+        ESP_ERROR_CHECK(led_strip_clear(secondary_strip));
+    }
 
     ESP_ERROR_CHECK(led_status_start(strip, secondary_strip, saved_channels));
     ESP_ERROR_CHECK(status_input_start_transports());

@@ -410,6 +410,7 @@ static int control_access(uint16_t conn_handle, uint16_t attr_handle,
         break;
     case PACKET_TYPE_CHANNEL_COUNT:
         if (packet_len == CHANNEL_COUNT_PACKET_SIZE && packet[4] >= 1U && packet[4] <= 2U) {
+            const uint8_t old_channel_count = led_status_get_channel_count();
             nvs_handle_t handle;
             result = nvs_open("status_panel", NVS_READWRITE, &handle);
             if (result == ESP_OK) {
@@ -419,9 +420,14 @@ static int control_access(uint16_t conn_handle, uint16_t attr_handle,
                 }
                 nvs_close(handle);
             }
-            if (result == ESP_OK) {
-                result = led_status_set_channel_count(packet[4]);
-                ESP_LOGI(TAG, "灯带输出通道已更新为 %u", packet[4]);
+            if (result == ESP_OK && packet[4] != old_channel_count) {
+                // RMT 内存和通道句柄只能在启动阶段安全重配，保存后重启生效。
+                ESP_LOGI(TAG, "灯带输出通道将从 %u 路切换为 %u 路，正在重启",
+                         old_channel_count, packet[4]);
+                if (xTaskCreate(delayed_restart_task, "channel_count_restart", 2048,
+                                NULL, 5, NULL) != pdPASS) {
+                    result = ESP_ERR_NO_MEM;
+                }
             }
         } else {
             result = ESP_ERR_INVALID_ARG;
