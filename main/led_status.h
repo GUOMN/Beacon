@@ -42,6 +42,9 @@ uint8_t led_status_get_channel_count(void);
 
 // 设置或读取指定灯珠的状态，灯珠编号为 0~5
 esp_err_t led_status_set(uint8_t index, const led_status_t *status);
+// 一次提交一段连续灯位，渲染任务不会观察到只更新了一部分的中间状态。
+esp_err_t led_status_set_batch(uint8_t first_index, const led_status_t *statuses,
+                               uint8_t count);
 esp_err_t led_status_get(uint8_t index, led_status_t *status);
 esp_err_t led_status_set_master_brightness(uint8_t percent);
 

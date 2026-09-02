@@ -159,31 +159,47 @@ esp_err_t dashboard_status_set_with_period(uint8_t led_index, panel_state_t stat
                         : LED_ANIMATION_TIMING_MANUAL);
 }
 
-esp_err_t dashboard_status_set_with_timing(uint8_t led_index, panel_state_t state,
-                                           uint8_t progress, uint16_t period_ms,
-                                           led_animation_timing_t timing_mode)
+static esp_err_t resolve_task_status(uint8_t led_index, panel_state_t state, uint8_t progress,
+                                     uint16_t period_ms,
+                                     led_animation_timing_t timing_mode,
+                                     led_status_t *result)
 {
-    ESP_RETURN_ON_FALSE(led_index < led_status_get_active_count(),
-                        ESP_ERR_INVALID_ARG, "dashboard", "灯珠编号无效");
-    ESP_RETURN_ON_FALSE(state <= PANEL_STATE_ERROR && progress <= 100U,
+    ESP_RETURN_ON_FALSE(result != NULL && state <= PANEL_STATE_ERROR && progress <= 100U,
                         ESP_ERR_INVALID_ARG, "dashboard", "状态或进度无效");
     ESP_RETURN_ON_FALSE(timing_mode <= LED_ANIMATION_TIMING_MANUAL,
                         ESP_ERR_INVALID_ARG, "dashboard", "动画计时模式无效");
     led_status_t led = semantic_to_led(state, progress);
-    led.timing_mode = timing_mode;
-    if (timing_mode == LED_ANIMATION_TIMING_MANUAL &&
-        led.effect != LED_EFFECT_SOLID && led.effect != LED_EFFECT_OFF) {
+    const bool animated = led.effect != LED_EFFECT_SOLID && led.effect != LED_EFFECT_OFF;
+    // 常亮和熄灭没有动画周期。将其归一为自动模式，避免下一次状态切换时
+    // 把无效的 0 ms 周期当作需要保留的手动周期。
+    led.timing_mode = animated ? timing_mode : LED_ANIMATION_TIMING_AUTO;
+    if (timing_mode == LED_ANIMATION_TIMING_MANUAL && animated) {
         ESP_RETURN_ON_FALSE(period_ms >= 200U && period_ms <= 10000U,
                             ESP_ERR_INVALID_ARG, "dashboard", "任务动画周期超出范围");
         led.period_ms = period_ms;
-    } else if (timing_mode == LED_ANIMATION_TIMING_AUTO &&
-               led.effect != LED_EFFECT_SOLID && led.effect != LED_EFFECT_OFF) {
+        // 手动频率按状态同步，不能继承连接流水或其他临时灯效的相位偏移。
+        led.phase_offset_ms = 0U;
+    } else if (timing_mode == LED_ANIMATION_TIMING_AUTO && animated) {
         // 自动模式按任务进度与灯位生成稳定但彼此独立的频率。
         // 进度越高动画越快；灯位扰动避免多个进行中任务机械同频。
         const uint16_t progress_period_ms = (uint16_t)(2200U - progress * 12U);
         led.period_ms = (uint16_t)(progress_period_ms + (led_index * 173U) % 431U);
         led.phase_offset_ms = 0U;
     }
+    *result = led;
+    return ESP_OK;
+}
+
+esp_err_t dashboard_status_set_with_timing(uint8_t led_index, panel_state_t state,
+                                           uint8_t progress, uint16_t period_ms,
+                                           led_animation_timing_t timing_mode)
+{
+    ESP_RETURN_ON_FALSE(led_index < led_status_get_active_count(),
+                        ESP_ERR_INVALID_ARG, "dashboard", "灯珠编号无效");
+    led_status_t led;
+    ESP_RETURN_ON_ERROR(resolve_task_status(
+                            led_index, state, progress, period_ms, timing_mode, &led),
+                        "dashboard", "解析任务灯状态失败");
     return led_status_set(led_index, &led);
 }
 
@@ -242,15 +258,8 @@ esp_err_t dashboard_status_set_state_style(panel_state_t state,
     return ESP_OK;
 }
 
-esp_err_t dashboard_status_set_usage(uint8_t remaining_percent,
-                                     uint8_t period_used_percent)
+static led_status_t usage_status(uint8_t remaining_percent, uint8_t period_used_percent)
 {
-    ESP_RETURN_ON_FALSE(remaining_percent <= 100U && period_used_percent <= 100U,
-                        ESP_ERR_INVALID_ARG, "dashboard", "用量百分比无效");
-
-    s_remaining_percent = remaining_percent;
-    s_period_used_percent = period_used_percent;
-
     uint8_t red;
     uint8_t green;
     if (remaining_percent >= 50U) {
@@ -265,7 +274,7 @@ esp_err_t dashboard_status_set_usage(uint8_t remaining_percent,
 
     // 周期用量 0% 时约 3.2 秒一次呼吸，100% 时约 0.4 秒一次。
     const uint16_t period_ms = (uint16_t)(3200U - period_used_percent * 28U);
-    const led_status_t status = {
+    return (led_status_t) {
         .red = red,
         .green = green,
         .blue = 0,
@@ -274,6 +283,17 @@ esp_err_t dashboard_status_set_usage(uint8_t remaining_percent,
         .effect = s_system_effect,
         .period_ms = period_ms,
     };
+}
+
+esp_err_t dashboard_status_set_usage(uint8_t remaining_percent,
+                                     uint8_t period_used_percent)
+{
+    ESP_RETURN_ON_FALSE(remaining_percent <= 100U && period_used_percent <= 100U,
+                        ESP_ERR_INVALID_ARG, "dashboard", "用量百分比无效");
+
+    s_remaining_percent = remaining_percent;
+    s_period_used_percent = period_used_percent;
+    const led_status_t status = usage_status(remaining_percent, period_used_percent);
     return led_status_set(PANEL_LED_USAGE, &status);
 }
 
@@ -321,15 +341,33 @@ esp_err_t dashboard_status_set_snapshot(uint8_t remaining_percent,
 {
     ESP_RETURN_ON_FALSE(task_states != NULL && task_progress != NULL,
                         ESP_ERR_INVALID_ARG, "dashboard", "快照数据为空");
-    ESP_RETURN_ON_ERROR(dashboard_status_set_usage(remaining_percent, period_used_percent),
-                        "dashboard", "应用用量状态失败");
+    ESP_RETURN_ON_FALSE(remaining_percent <= 100U && period_used_percent <= 100U,
+                        ESP_ERR_INVALID_ARG, "dashboard", "用量百分比无效");
+    s_remaining_percent = remaining_percent;
+    s_period_used_percent = period_used_percent;
+    led_status_t next[6];
+    next[PANEL_LED_USAGE] = usage_status(remaining_percent, period_used_percent);
     for (uint8_t i = 0; i < 5U; ++i) {
+        const uint8_t led_index = (uint8_t)(PANEL_LED_TASK_1 + i);
+        led_status_t current;
+        const bool preserve_manual_timing =
+            led_status_get(led_index, &current) == ESP_OK &&
+            current.timing_mode == LED_ANIMATION_TIMING_MANUAL &&
+            current.effect != LED_EFFECT_SOLID && current.effect != LED_EFFECT_OFF &&
+            current.period_ms >= 200U && current.period_ms <= 10000U;
+
+        // 兼容快照不携带计时模式。系统指标的周期刷新可能只下发这个包，
+        // 因此已有的手动状态级周期必须保留，不能退回逐任务自动频率。
         ESP_RETURN_ON_ERROR(
-            dashboard_status_set((uint8_t)(PANEL_LED_TASK_1 + i),
-                                 (panel_state_t)task_states[i], task_progress[i]),
-            "dashboard", "应用状态快照失败");
+            resolve_task_status(
+                led_index, (panel_state_t)task_states[i], task_progress[i],
+                preserve_manual_timing ? current.period_ms : 0U,
+                preserve_manual_timing ? LED_ANIMATION_TIMING_MANUAL
+                                       : LED_ANIMATION_TIMING_AUTO,
+                &next[PANEL_LED_TASK_1 + i]),
+            "dashboard", "解析状态快照失败");
     }
-    return ESP_OK;
+    return led_status_set_batch(PANEL_LED_USAGE, next, 6U);
 }
 
 esp_err_t dashboard_status_set_connection(bool connected, bool data_alive,

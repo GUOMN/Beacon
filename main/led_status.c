@@ -66,6 +66,7 @@ static void render_task(void *argument)
 {
     (void)argument;
     led_status_t snapshot[STATUS_LED_MAX_COUNT];
+    uint8_t frame_rgb[STATUS_LED_MAX_COUNT][3];
     uint8_t previous_rgb[STATUS_LED_MAX_COUNT][3] = {0};
     bool first_frame = true;
     TickType_t last_wake_tick = xTaskGetTickCount();
@@ -83,23 +84,35 @@ static void render_task(void *argument)
         const uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
         bool frame_changed = first_frame || force_refresh;
         for (uint8_t i = 0; i < active_count; ++i) {
-            const float scale = effect_scale(&snapshot[i], now_ms);
-            const uint8_t red = scale_channel(snapshot[i].red, snapshot[i].brightness, scale);
-            const uint8_t green = scale_channel(snapshot[i].green, snapshot[i].brightness, scale);
-            const uint8_t blue = scale_channel(snapshot[i].blue, snapshot[i].brightness, scale);
-            if (first_frame || force_refresh || red != previous_rgb[i][0] || green != previous_rgb[i][1] ||
-                blue != previous_rgb[i][2]) {
-                for (uint8_t channel = 0; channel < s_channel_count; ++channel) {
-                    ESP_ERROR_CHECK(led_strip_set_pixel(s_strips[channel], i, red, green, blue));
-                }
-                previous_rgb[i][0] = red;
-                previous_rgb[i][1] = green;
-                previous_rgb[i][2] = blue;
+            if (snapshot[i].effect == LED_EFFECT_OFF) {
+                frame_rgb[i][0] = 0U;
+                frame_rgb[i][1] = 0U;
+                frame_rgb[i][2] = 0U;
+            } else {
+                const float scale = effect_scale(&snapshot[i], now_ms);
+                frame_rgb[i][0] = scale_channel(snapshot[i].red, snapshot[i].brightness, scale);
+                frame_rgb[i][1] = scale_channel(snapshot[i].green, snapshot[i].brightness, scale);
+                frame_rgb[i][2] = scale_channel(snapshot[i].blue, snapshot[i].brightness, scale);
+            }
+            if (frame_rgb[i][0] != previous_rgb[i][0] ||
+                frame_rgb[i][1] != previous_rgb[i][1] ||
+                frame_rgb[i][2] != previous_rgb[i][2]) {
                 frame_changed = true;
             }
         }
-        // 常亮、熄灭以及闪烁平台期不重复启动 RMT，减少 CPU 唤醒和外设活动。
+        // 每次实际发送都重建完整像素缓冲。OFF 状态计算结果恒为 0,0,0，
+        // 因而不会沿用前一帧或临时动画残留的数据。
         if (frame_changed) {
+            for (uint8_t i = 0; i < active_count; ++i) {
+                for (uint8_t channel = 0; channel < s_channel_count; ++channel) {
+                    ESP_ERROR_CHECK(led_strip_set_pixel(
+                        s_strips[channel], i,
+                        frame_rgb[i][0], frame_rgb[i][1], frame_rgb[i][2]));
+                }
+                previous_rgb[i][0] = frame_rgb[i][0];
+                previous_rgb[i][1] = frame_rgb[i][1];
+                previous_rgb[i][2] = frame_rgb[i][2];
+            }
             for (uint8_t channel = 0; channel < s_channel_count; ++channel) {
                 ESP_ERROR_CHECK(led_strip_refresh(s_strips[channel]));
             }
@@ -138,7 +151,7 @@ esp_err_t led_status_start(led_strip_handle_t primary_strip,
         };
     }
 
-    BaseType_t created = xTaskCreate(render_task, "led_renderer", 3072, NULL, 5, NULL);
+    BaseType_t created = xTaskCreate(render_task, "led_renderer", 4096, NULL, 5, NULL);
     ESP_RETURN_ON_FALSE(created == pdPASS, ESP_ERR_NO_MEM, TAG, "无法创建显示任务");
     ESP_LOGI(TAG, "六灯独立状态渲染已启动");
     return ESP_OK;
@@ -169,21 +182,30 @@ uint8_t led_status_get_channel_count(void)
 
 esp_err_t led_status_set(uint8_t index, const led_status_t *status)
 {
+    return led_status_set_batch(index, status, 1U);
+}
+
+esp_err_t led_status_set_batch(uint8_t first_index, const led_status_t *statuses,
+                               uint8_t count)
+{
     ESP_RETURN_ON_FALSE(s_status_mutex != NULL, ESP_ERR_INVALID_STATE, TAG, "显示任务未启动");
-    ESP_RETURN_ON_FALSE(index < s_active_count && status != NULL,
-                        ESP_ERR_INVALID_ARG, TAG, "灯珠编号或状态无效");
-    ESP_RETURN_ON_FALSE(status->effect <= LED_EFFECT_DOUBLE_BLINK,
-                        ESP_ERR_INVALID_ARG, TAG, "显示效果无效");
-    ESP_RETURN_ON_FALSE(status->blink_duty_percent <= 100U,
-                        ESP_ERR_INVALID_ARG, TAG, "闪烁占空比无效");
-    ESP_RETURN_ON_FALSE(status->timing_mode <= LED_ANIMATION_TIMING_MANUAL,
-                        ESP_ERR_INVALID_ARG, TAG, "动画计时模式无效");
+    ESP_RETURN_ON_FALSE(statuses != NULL && count > 0U && first_index < s_active_count &&
+                            count <= s_active_count - first_index,
+                        ESP_ERR_INVALID_ARG, TAG, "批量灯珠范围或状态无效");
+    for (uint8_t i = 0; i < count; ++i) {
+        ESP_RETURN_ON_FALSE(statuses[i].effect <= LED_EFFECT_DOUBLE_BLINK,
+                            ESP_ERR_INVALID_ARG, TAG, "显示效果无效");
+        ESP_RETURN_ON_FALSE(statuses[i].blink_duty_percent <= 100U,
+                            ESP_ERR_INVALID_ARG, TAG, "闪烁占空比无效");
+        ESP_RETURN_ON_FALSE(statuses[i].timing_mode <= LED_ANIMATION_TIMING_MANUAL,
+                            ESP_ERR_INVALID_ARG, TAG, "动画计时模式无效");
+    }
 
     xSemaphoreTake(s_status_mutex, portMAX_DELAY);
-    s_status[index] = *status;
-    // A semantic state write must reach the physical strip even when the
-    // calculated RGB happens to equal the renderer's cached previous frame.
-    // That cache can temporarily diverge after identify/connection changes.
+    for (uint8_t i = 0; i < count; ++i) {
+        s_status[first_index + i] = statuses[i];
+    }
+    // 语义状态写入必须到达物理灯带，即使计算后的 RGB 与缓存恰好相同。
     s_force_refresh = true;
     xSemaphoreGive(s_status_mutex);
     return ESP_OK;
