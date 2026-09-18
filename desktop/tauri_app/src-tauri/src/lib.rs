@@ -117,6 +117,10 @@ fn materialize_embedded_bridge() -> Result<PathBuf, String> {
             include_bytes!("../../../codex_status_core/models.py"),
         ),
         (
+            "codex_status_core/mqtt_sync.py",
+            include_bytes!("../../../codex_status_core/mqtt_sync.py"),
+        ),
+        (
             "codex_status_core/protocol.py",
             include_bytes!("../../../codex_status_core/protocol.py"),
         ),

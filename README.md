@@ -7,7 +7,7 @@
 ## 主要功能
 
 - Windows 与 macOS 共用 Tauri + React 桌面界面，蓝牙扫描、绑定、重连、识别、配置下发和 OTA 均由原生传输层完成。
-- Codex 官方 Hook 和本机自定义适配器把任务事件写入 Beacon 私有 SQLite；任务内容与配置不会上传到远端服务。
+- Codex 官方 Hook 和本机自定义适配器把任务事件写入 Beacon 私有 SQLite；可在桌面端启用 MQTT 对外同步，将所有进入 Beacon 的任务状态发送到指定 Broker。
 - 任务可排序、固定到灯位、删除或批量清理；文件系统事件触发后台刷新，连续变化只下发最新状态。
 - 面板可配置 0～3 张本机指标卡：5 小时 Token、7 天 Token、系统繁忙程度和今日任务数。不配置时不显示指标区。
 - 菜单栏/系统托盘提供常用任务操作；macOS 应用包还包含可添加到桌面或通知中心的 Beacon 快捷操作小组件。
@@ -76,7 +76,7 @@ ESP32-C3 ──▶ 在本地运行灯光动画 ──▶ WS2812 灯带
 
 1. 桌面端从本机任务工具获取状态，并保存在本地。
 2. 每块灯板通过芯片唯一 ID 区分。首次使用时扫描、识别并绑定自己的灯板，避免办公室内同名设备串连。
-3. 任务或配置变化时，桌面端通过 BLE 下发状态；灯光动画由 ESP32 本地持续运行，不需要电脑高频发送每一帧。
+3. 任务或配置变化时，桌面端通过 BLE 下发状态；启用 MQTT 时，同一任务域变化会经本机持久化 Outbox 异步发送到 Broker。灯光动画由 ESP32 本地持续运行，不需要电脑高频发送每一帧。
 4. 灯数、状态灯效、系统灯效、系统灯独立亮度、输出通道和休眠时间会保存在灯板中；总亮度和当前任务状态属于运行数据，连接后由桌面端用最新值恢复。
 5. 首次安装 OTA 固件后，后续固件可以直接通过桌面端蓝牙升级。
 
@@ -165,7 +165,7 @@ Beacon displays computer task states on a WS2812 LED strip. The first LED repres
 ### Features
 
 - Shared Tauri + React desktop app for Windows and macOS, with native BLE scanning, binding, reconnect, identification, configuration writes, and OTA.
-- Codex Hooks and optional local adapters write task events to an application-owned SQLite database; task content and settings are not uploaded to a remote service.
+- Codex Hooks and optional local adapters write task events to an application-owned SQLite database; MQTT outbound sync can publish every task-domain change to a configured broker.
 - Task reordering, pinning, deletion, completed-task cleanup, and latest-wins synchronization for bursts of task or BLE updates.
 - Zero to three optional local metric cards: 5-hour tokens, 7-day tokens, system load, and today's task count. The metric area is hidden when no cards are selected.
 - Menu bar/system tray quick actions, plus a macOS WidgetKit extension for desktop and Notification Center task controls.
@@ -205,7 +205,7 @@ For CH340 flashing, connect CH340 TXD to GPIO20, CH340 RXD to GPIO21, and connec
 
 ### Communication model
 
-The desktop app collects local task events, stores them locally, and sends state changes to the bound ESP32-C3 over Bluetooth Low Energy. Each board exposes a unique chip-derived ID, so multiple boards with the same visible name can be identified and bound safely. The ESP32 renders animations locally; the computer does not stream every animation frame.
+The desktop app collects local task events, stores them locally, and sends state changes to the bound ESP32-C3 over Bluetooth Low Energy. When MQTT outbound sync is enabled, all task events and task-list mutations are also queued locally and published with QoS 1 to the configured broker and exact configured publish topic. The ESP32 renders animations locally; the computer does not stream every animation frame.
 
 LED count, state effects, system effect, independent system LED brightness, output channels, and sleep timeout persist on the board. Master brightness and current task states are runtime values restored by the desktop app after connection. After the initial OTA-capable firmware is installed, later firmware updates can be sent over Bluetooth from the desktop app.
 

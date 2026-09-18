@@ -21,6 +21,7 @@ from codex_status_core.custom_source import (
 from codex_status_core.hook_manager import HookProvider, install, status, uninstall
 from codex_status_core.hook_adapter import _hook_payload_failed
 from codex_status_core.models import TaskSlot
+from codex_status_core.mqtt_sync import validate_mqtt_settings
 from tauri_bridge import (
     apply_device, data_sources, delete_custom_source, manage_tasks, save_custom_source,
     set_data_source, settings, save_settings,
@@ -37,6 +38,25 @@ class EventPipelineTests(unittest.TestCase):
                 self.assertEqual(settings()["metric_cards"], ["five_hour_tokens", "today_task_count"])
                 with self.assertRaisesRegex(ValueError, "最多"):
                     save_settings({"metric_cards": ["five_hour_tokens", "seven_day_tokens", "system_busy", "today_task_count"]})
+
+    def test_mqtt_password_is_saved_but_not_returned_to_the_ui(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            path = Path(folder) / "settings.json"
+            with patch("tauri_bridge._settings_path", return_value=path), patch("tauri_bridge.StatusEventStore"), patch(
+                "tauri_bridge._legacy_remote_data_purged", True
+            ):
+                result = save_settings({"mqtt": {
+                    "enabled": True,
+                    "target": "mqtts://broker.example.com:8883",
+                    "topic": "beacon/tasks",
+                    "username": "beacon",
+                    "password": "secret-value",
+                }})
+            self.assertEqual(result["mqtt"]["username"], "beacon")
+            self.assertTrue(result["mqtt"]["has_password"])
+            self.assertNotIn("password", result["mqtt"])
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["mqtt"]["password"], "secret-value")
 
     def test_connect_target_does_not_change_saved_binding_before_validation(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
@@ -179,6 +199,35 @@ class EventPipelineTests(unittest.TestCase):
             store.record(event)
             with store._connect() as database:
                 self.assertEqual(database.execute("SELECT COUNT(*) FROM task_events").fetchone()[0], 1)
+
+    def test_mqtt_outbox_receives_events_from_any_source_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            store = StatusEventStore(Path(folder) / "events.sqlite")
+            store.configure_mqtt(True)
+            store.record({"task_id": "custom:tool:1", "title": "来自适配器", "state": "running", "source": "任意工具"})
+            message = store.next_mqtt_message()
+            self.assertIsNotNone(message)
+            payload = json.loads(str(message["payload"]))
+            self.assertEqual(payload["type"], "task.event")
+            self.assertEqual(payload["task"]["source"], "任意工具")
+
+    def test_mqtt_topic_is_the_exact_configured_publish_topic(self) -> None:
+        settings = validate_mqtt_settings({"enabled": True, "target": "mqtt://broker:1883", "topic": "office/beacon"})
+        self.assertEqual(settings["topic"], "office/beacon")
+
+    def test_mqtt_outbox_stays_empty_while_disabled_and_emits_delete(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            store = StatusEventStore(Path(folder) / "events.sqlite")
+            store.record({"task_id": "one", "title": "任务", "state": "running"})
+            self.assertIsNone(store.next_mqtt_message())
+            store.configure_mqtt(True)
+            store.delete_tasks(["one"])
+            messages = []
+            while message := store.next_mqtt_message():
+                messages.append(json.loads(str(message["payload"])))
+                store.mark_mqtt_published(int(message["id"]))
+            self.assertEqual(messages[0]["type"], "task.deleted")
+            self.assertEqual(messages[1]["type"], "task.snapshot")
 
     def test_database_connections_close_after_each_operation(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:

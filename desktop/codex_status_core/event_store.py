@@ -6,6 +6,7 @@ import platform
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -99,6 +100,19 @@ class StatusEventStore:
                     context_window INTEGER NOT NULL DEFAULT 0,
                     updated_at_ms INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS mqtt_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE,
+                    payload TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    published_at_ms INTEGER,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT
+                );
+                CREATE TABLE IF NOT EXISTS mqtt_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 """
             )
             columns = {row[1] for row in database.execute("PRAGMA table_info(task_events)")}
@@ -118,6 +132,66 @@ class StatusEventStore:
             layout_columns = {row[1] for row in database.execute("PRAGMA table_info(task_layout)")}
             if "pinned" not in layout_columns:
                 database.execute("ALTER TABLE task_layout ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+
+    @staticmethod
+    def _mqtt_enabled(database: sqlite3.Connection) -> bool:
+        row = database.execute("SELECT value FROM mqtt_metadata WHERE key='enabled'").fetchone()
+        return row is not None and row[0] == "1"
+
+    def _enqueue_mqtt(self, database: sqlite3.Connection, event_type: str, body: dict[str, Any]) -> None:
+        if not self._mqtt_enabled(database):
+            return
+        now_ms = time.time_ns() // 1_000_000
+        event_id = uuid.uuid4().hex
+        payload = {
+            "schema": "beacon.task-sync.v1",
+            "event_id": event_id,
+            "type": event_type,
+            "occurred_at_ms": now_ms,
+            **body,
+        }
+        database.execute(
+            "INSERT INTO mqtt_outbox(event_id,payload,created_at_ms) VALUES(?,?,?)",
+            (event_id, json.dumps(payload, ensure_ascii=False, separators=(",", ":")), now_ms),
+        )
+
+    def configure_mqtt(self, enabled: bool) -> None:
+        """Enable/disable outbound sync without coupling ingestion to a source."""
+        with self._connect() as database:
+            database.execute(
+                "INSERT INTO mqtt_metadata(key,value) VALUES('enabled',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                ("1" if enabled else "0",),
+            )
+            if not enabled:
+                database.execute("DELETE FROM mqtt_outbox WHERE published_at_ms IS NULL")
+
+    def enqueue_mqtt_snapshot(self) -> None:
+        """Queue the current task-list view after a list-level mutation or enable."""
+        records = self.latest_records(1000)
+        with self._connect() as database:
+            self._enqueue_mqtt(database, "task.snapshot", {"tasks": records})
+
+    def next_mqtt_message(self) -> dict[str, Any] | None:
+        with self._connect() as database:
+            row = database.execute(
+                "SELECT id,event_id,payload FROM mqtt_outbox WHERE published_at_ms IS NULL ORDER BY id LIMIT 1"
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def mark_mqtt_published(self, message_id: int) -> None:
+        with self._connect() as database:
+            database.execute(
+                "UPDATE mqtt_outbox SET published_at_ms=?,last_error=NULL WHERE id=?",
+                (time.time_ns() // 1_000_000, message_id),
+            )
+
+    def mark_mqtt_failed(self, message_id: int, error: str) -> None:
+        with self._connect() as database:
+            database.execute(
+                "UPDATE mqtt_outbox SET retry_count=retry_count+1,last_error=? WHERE id=?",
+                (error[:500], message_id),
+            )
 
     def record(self, event: dict[str, Any]) -> None:
         state = str(event.get("state", "")).lower()
@@ -144,13 +218,20 @@ class StatusEventStore:
                    VALUES (?, COALESCE((SELECT MAX(display_order) + 1 FROM task_layout), 0), 0)""",
                 (task_id,),
             )
-            database.execute(
+            result = database.execute(
                 """
                 INSERT OR IGNORE INTO task_events(task_id, title, state, progress, source, input_tokens, output_tokens, event_key, occurred_at_ms)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (task_id, title, state, progress, source, input_tokens, output_tokens, event_key, occurred_at_ms),
             )
+            if result.rowcount:
+                self._enqueue_mqtt(database, "task.event", {
+                    "task": {
+                        "task_id": task_id, "title": title, "state": state, "progress": progress,
+                        "source": source, "occurred_at_ms": occurred_at_ms,
+                    },
+                })
 
     def latest_records(self, limit: int = 500) -> list[dict[str, Any]]:
         """返回每个任务的最新记录，供状态页展示和人工修正。"""
@@ -204,6 +285,7 @@ class StatusEventStore:
                        ON CONFLICT(task_id) DO UPDATE SET display_order=excluded.display_order""",
                     (task_id, order),
                 )
+        self.enqueue_mqtt_snapshot()
 
     def set_pinned(self, task_id: str, pinned: bool) -> None:
         with self._connect() as database:
@@ -213,6 +295,7 @@ class StatusEventStore:
                    ON CONFLICT(task_id) DO UPDATE SET pinned=excluded.pinned""",
                 (task_id, 1 if pinned else 0),
             )
+        self.enqueue_mqtt_snapshot()
 
     def assign_task_to_slot(self, task_id: str, slot: int) -> None:
         """Pin one task to a visible LED slot and release the previous occupant."""
@@ -227,13 +310,22 @@ class StatusEventStore:
                    ON CONFLICT(task_id) DO UPDATE SET display_order=excluded.display_order,pinned=1""",
                 (task_id, slot),
             )
+        self.enqueue_mqtt_snapshot()
 
     def delete_tasks(self, task_ids: list[str]) -> None:
         """物理删除任务及全部历史事件；调用方应明确提示不可恢复。"""
         with self._connect() as database:
+            existing = database.execute(
+                "SELECT DISTINCT task_id FROM task_events WHERE task_id IN (%s)" % ",".join("?" for _ in task_ids),
+                task_ids,
+            ).fetchall() if task_ids else []
+            for row in existing:
+                self._enqueue_mqtt(database, "task.deleted", {"task_id": str(row["task_id"])})
             database.executemany("DELETE FROM task_events WHERE task_id=?", [(task_id,) for task_id in task_ids])
             database.executemany("DELETE FROM task_layout WHERE task_id=?", [(task_id,) for task_id in task_ids])
             database.executemany("DELETE FROM task_usage WHERE task_id=?", [(task_id,) for task_id in task_ids])
+        if task_ids:
+            self.enqueue_mqtt_snapshot()
 
     def fail_interrupted_tasks(self) -> None:
         """Close transient tasks left behind by a previous application run."""

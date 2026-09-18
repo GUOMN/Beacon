@@ -22,6 +22,7 @@ from codex_status_core.hook_manager import providers as hook_providers
 from codex_status_core.hook_manager import status as hook_status
 from codex_status_core.hook_manager import uninstall as uninstall_hook
 from codex_status_core.models import DashboardSnapshot, StateStyle, TaskSlot, TaskState
+from codex_status_core.mqtt_sync import MqttPublisher, validate_mqtt_settings
 
 DEFAULT_STYLES = {
     "running": {"color": "#5B8FF9", "effect": 3, "frequency": 50, "duty": 50, "automatic": True},
@@ -36,6 +37,7 @@ _custom_registry = CustomSourceRegistry()
 _custom_supervisor: CustomSourceSupervisor | None = None
 _runtime_store: StatusEventStore | None = None
 _codex_source: CodexSessionSource | None = None
+_mqtt_publisher: MqttPublisher | None = None
 _legacy_remote_data_purged = False
 _METRIC_CARD_OPTIONS = {
     "five_hour_tokens": ("5 小时 Token", "本机 SQLite task_usage 近 5 小时累计"),
@@ -125,6 +127,19 @@ def _settings_path() -> Path:
     return app_data_directory() / "settings.json"
 
 
+def _read_mqtt_settings(data: dict[str, object]) -> dict[str, object]:
+    raw = data.get("mqtt", {})
+    return validate_mqtt_settings(raw if isinstance(raw, dict) else {})
+
+
+def _mqtt_runtime_settings() -> dict[str, object]:
+    try:
+        data = json.loads(_settings_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    return _read_mqtt_settings(data)
+
+
 def _purge_legacy_remote_data(data: dict[str, object]) -> bool:
     """Remove the discontinued Sub2API configuration and its local tables once."""
     global _legacy_remote_data_purged
@@ -153,7 +168,10 @@ def settings() -> dict[str, object]:
     styles = {key: {**value, **data.get("state_styles", {}).get(key, {})} for key, value in DEFAULT_STYLES.items()}
     weights = {key: max(0, min(100, int(data.get("busy_weights", {}).get(key, value)))) for key, value in DEFAULT_BUSY_WEIGHTS.items()}
     metric_cards = [str(value) for value in data.get("metric_cards", []) if str(value) in _METRIC_CARD_OPTIONS][:3]
-    return {"bound_device_id": data.get("bound_device_id"), "brightness": int(data.get("master_brightness", 30)), "system_brightness": int(data.get("system_brightness", 100)), "sleep_minutes": int(data.get("sleep_timeout_minutes", 10)), "led_count": int(data.get("total_led_count", 6)), "output_channels": int(data.get("output_channels", 1)), "styles": styles, "busy_weights": weights, "system_color_source": str(data.get("system_color_source", "账号余量")), "system_effect": int(data.get("system_effect", 4)), "metric_cards": metric_cards}
+    mqtt = _read_mqtt_settings(data)
+    mqtt_public = {key: value for key, value in mqtt.items() if key != "password"}
+    mqtt_public["has_password"] = bool(mqtt["password"])
+    return {"bound_device_id": data.get("bound_device_id"), "brightness": int(data.get("master_brightness", 30)), "system_brightness": int(data.get("system_brightness", 100)), "sleep_minutes": int(data.get("sleep_timeout_minutes", 10)), "led_count": int(data.get("total_led_count", 6)), "output_channels": int(data.get("output_channels", 1)), "styles": styles, "busy_weights": weights, "system_color_source": str(data.get("system_color_source", "账号余量")), "system_effect": int(data.get("system_effect", 4)), "metric_cards": metric_cards, "mqtt": mqtt_public, "mqtt_status": _mqtt_publisher.status() if _mqtt_publisher is not None else ("已启用，等待客户端启动" if mqtt["enabled"] else "已停用")}
 
 
 def save_settings(payload: dict[str, object]) -> dict[str, object]:
@@ -162,7 +180,8 @@ def save_settings(payload: dict[str, object]) -> dict[str, object]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         data = {}
-    for key in ("bound_device_id", "master_brightness", "system_brightness", "sleep_timeout_minutes", "total_led_count", "output_channels", "state_styles", "busy_weights", "system_color_source", "system_effect", "metric_cards"):
+    previous_mqtt = _read_mqtt_settings(data)
+    for key in ("bound_device_id", "master_brightness", "system_brightness", "sleep_timeout_minutes", "total_led_count", "output_channels", "state_styles", "busy_weights", "system_color_source", "system_effect", "metric_cards", "mqtt"):
         if key in payload:
             if key == "metric_cards":
                 cards = [str(value) for value in payload[key] if str(value) in _METRIC_CARD_OPTIONS] if isinstance(payload[key], list) else []
@@ -170,10 +189,32 @@ def save_settings(payload: dict[str, object]) -> dict[str, object]:
                     raise ValueError("指标卡最多可选择 3 张且不能重复")
                 data[key] = cards
                 continue
+            if key == "mqtt":
+                if not isinstance(payload[key], dict):
+                    raise ValueError("MQTT 配置无效")
+                mqtt_payload = dict(payload[key])
+                if not mqtt_payload.get("password") and previous_mqtt["password"] and not mqtt_payload.get("clear_password"):
+                    mqtt_payload["password"] = previous_mqtt["password"]
+                if mqtt_payload.get("clear_password"):
+                    mqtt_payload["password"] = ""
+                data[key] = validate_mqtt_settings(mqtt_payload)
+                continue
             data[key] = payload[key]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    current_mqtt = _read_mqtt_settings(data)
+    if current_mqtt != previous_mqtt:
+        store = StatusEventStore()
+        store.configure_mqtt(bool(current_mqtt["enabled"]))
+        if current_mqtt["enabled"]:
+            store.enqueue_mqtt_snapshot()
     return settings()
+
+
+def test_mqtt_connection(_payload: dict[str, object]) -> dict[str, object]:
+    publisher = _mqtt_publisher or MqttPublisher(StatusEventStore(), _mqtt_runtime_settings)
+    publisher.test_connection()
+    return {"ok": True, "status": "连接成功"}
 
 
 def manage_tasks(payload: dict[str, object]) -> dict[str, object]:
@@ -382,6 +423,7 @@ def main() -> int:
         "dashboard": lambda _p: dashboard(),
         "settings": lambda _p: settings(),
         "save-settings": save_settings,
+        "test-mqtt-connection": test_mqtt_connection,
         "manage-tasks": manage_tasks,
         "data-sources": data_sources,
         "set-data-source": set_data_source,
@@ -390,9 +432,11 @@ def main() -> int:
         "apply-device": apply_device,
     }
     if command == "serve":
-        global _custom_supervisor, _runtime_store
+        global _custom_supervisor, _runtime_store, _mqtt_publisher
         store = StatusEventStore()
         _runtime_store = store
+        _mqtt_publisher = MqttPublisher(store, _mqtt_runtime_settings)
+        _mqtt_publisher.start()
         store.fail_interrupted_tasks()
         event_server = EventIngestServer(store)
         event_server.start()
@@ -416,6 +460,8 @@ def main() -> int:
             _custom_supervisor = None
             _sync_codex_source(False)
             _runtime_store = None
+            _mqtt_publisher.stop()
+            _mqtt_publisher = None
             event_server.stop()
         return 0
     try:
