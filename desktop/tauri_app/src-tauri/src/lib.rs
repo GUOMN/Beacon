@@ -1,3 +1,6 @@
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod ping;
+
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 #[cfg(all(not(target_os = "macos"), not(windows)))]
 use btleplug::api::{
@@ -2045,6 +2048,15 @@ fn start_heartbeat(ble: NativeBleState) {
     });
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[tauri::command]
+fn start_ping_overlay() -> Result<(), String> {
+    Err("当前系统不支持全局 Ping 轮盘".into())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use ping::start_ping_overlay;
+
 #[tauri::command]
 async fn bridge_action(
     bridge: tauri::State<'_, BridgeState>,
@@ -2351,11 +2363,16 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let builder = builder.manage(ping::PingRuntime::default());
+
     builder
         .manage(BridgeState(Arc::new(Mutex::new(None))))
         .manage(NativeBleState::new())
         .setup(|app| {
             start_task_event_sync(app.handle().clone())?;
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            ping::setup(app)?;
             let tray_window = WebviewWindowBuilder::new(
                 app,
                 "tray-popup",
@@ -2442,6 +2459,7 @@ pub fn run() {
             ota_start,
             ota_progress,
             bridge_action,
+            start_ping_overlay,
             sync_widget_context,
             open_main_window
         ])

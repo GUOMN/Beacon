@@ -1,0 +1,212 @@
+#pragma once
+#include <array>
+#include <cstdint>
+#include <functional>
+#include <set>
+#include <vector>
+
+namespace lp {
+
+enum class Btn { None, Left, Right, Middle, X1, X2 };
+enum class EvKind { MouseDown, MouseUp, MouseMove, KeyDown, KeyUp, Scroll };
+
+struct InputEvent {
+  EvKind kind = EvKind::MouseMove;
+  Btn btn = Btn::None;
+  uint32_t vk = 0;
+  int x = 0;
+  int y = 0;
+  bool selfInjected = false;  // injected by this helper (marker in dwExtraInfo)
+  uint64_t timeMs = 0;
+};
+
+enum class Trigger { Alt, Ctrl, Shift, Win, CapsLock, Mouse4, Mouse5, CustomVk, None };  // None: no trigger (emote or ask key off)
+
+// The wheels a gesture can open: each has its own trigger.
+enum class WheelKind { Ping, Emote, Ask };
+inline constexpr WheelKind kWheels[] = {WheelKind::Ping, WheelKind::Emote, WheelKind::Ask};
+
+constexpr uint32_t ModCtrl = 1;
+constexpr uint32_t ModAlt = 2;
+constexpr uint32_t ModShift = 4;
+constexpr uint32_t ModWin = 8;
+
+struct Config {
+  Trigger trigger = Trigger::Alt;  // the ping wheel's
+  uint32_t triggerVk = 0;          // only for Trigger::CustomVk
+  bool clickPing = false;
+  // Fullscreen apps (games) keep every click. Off here so a config without the field changes nothing;
+  // the app's setting defaults it on.
+  bool gameCheck = false;
+  Trigger emoteTrigger = Trigger::None;  // the emote wheel's
+  uint32_t emoteTriggerVk = 0;           // only for Trigger::CustomVk
+  bool emoteClick = false;
+  Trigger askTrigger = Trigger::None;  // the teammate's ask wheel
+  uint32_t askTriggerVk = 0;           // only for Trigger::CustomVk
+  bool askClick = false;
+  // A double tap of the ask key (the ping key when the ask key is off) asks with words. Modifier keys only.
+  bool askDoubleTap = false;
+  int dragThresholdPx = 8;
+  uint32_t toggleMods = ModCtrl | ModAlt;
+  uint32_t toggleVk = 0x50;  // 'P'
+  // The room keys are live only once a config turns them on (0 = off), so nothing is captured before the first config.
+  uint32_t textMods = ModCtrl | ModAlt;
+  uint32_t textVk = 0;
+  uint32_t panelVk = 0;  // held to show the room panel; captured with no modifier, never replayed
+  bool enabled = true;
+};
+
+struct Emit {
+  // TriggerUp: a wheel's trigger key came up after a release or click while it was held, or the wheel was
+  // released after its key. AskWords: a double tap of the ask key, at the pointer. Scroll: the wheel turned
+  // while the stale watch is on, at the pointer.
+  enum class Kind {
+    WheelOpen, WheelMove, WheelRelease, Click, Cancel, Toggled, TextRequested, Panel, TriggerUp, AskWords, Scroll
+  } kind;
+  int x = 0;
+  int y = 0;
+  WheelKind wheel = WheelKind::Ping;  // point events and TriggerUp: the wheel whose trigger started the gesture
+  bool enabled = false;               // Toggled only
+  bool show = false;                  // Panel only
+};
+
+enum class InjectKind { ButtonDown, ButtonUp, KeyDown, KeyUp };
+
+struct Inject {
+  InjectKind kind;
+  Btn btn = Btn::None;
+  uint32_t vk = 0;
+};
+
+struct Result {
+  bool swallow = false;
+  std::vector<Emit> emits;
+  std::vector<Inject> injects;
+};
+
+constexpr uint32_t kMaskVk = 0xFC;  // VK_NONAME: harmless key that stops Alt/Win menu activation
+constexpr uint64_t kWatchdogMs = 10000;
+// A held key repeats well inside this; a captured panel key that goes quiet for longer has lost its key-up.
+constexpr uint64_t kPanelRepeatGapMs = 1500;
+// Each press and release of a double tap, and the gap between the taps, must fit in this.
+constexpr uint64_t kDoubleTapMs = 350;
+// At most one scroll is reported per this long: a wheel notch burst or a trackpad glide sends hundreds.
+constexpr uint64_t kScrollGapMs = 100;
+
+// Decides what happens to every input event. Pure logic: no Windows calls.
+class Decision {
+ public:
+  enum class State { Idle, Pending, Wheel, SwallowUp };
+
+  Result setConfig(const Config& c);
+  Result setEnabled(bool on);
+  Result setSuspended(bool on);
+  Result onEvent(const InputEvent& e);
+  Result tick(uint64_t nowMs);
+  // Per platform: does a fullscreen app own the screen under the click at (x, y)? Unset: gameCheck never fires.
+  void setFullscreenProbe(std::function<bool(int x, int y)> probe);
+  // Windows opens the menu bar / Start menu on a lone Alt / Win key-up, so a swallowed press while one is held
+  // gets a mask key before that key-up. macOS has no such behaviour: its hook layer turns this off.
+  void setMaskMenuKeys(bool on) { maskMenuKeys_ = on; }
+  // How long a captured panel key may go without a repeat before the panel hides itself (a lost key-up).
+  // 0 = no watchdog, for platforms where repeats are not a reliable sign that the key is still down.
+  void setPanelRepeatGap(uint64_t ms) { panelRepeatGapMs_ = ms; }
+  // Hides the panel without a key-up (the OS stopped telling us about keys). The up, if it comes, stays swallowed.
+  Result releasePanel();
+  // Scroll events are reported only while this is on (the teammate has marks on screen). It never touches a
+  // gesture, which is why it is not a config field.
+  Result setStaleWatch(bool on);
+
+  // Resync with the OS: forget keys we believe are down but isDown(vk) says are up
+  // (key-ups the hook never saw: Win+L, Ctrl+Alt+Del, UAC, hook reinstall). Never marks a key as down.
+  // Keys whose down we swallowed (a pending key-up swallow) are kept: the OS never saw them go down.
+  void syncKeyStates(const std::function<bool(uint32_t vk)>& isDown);
+
+  State state() const { return state_; }
+  bool enabled() const { return enabled_; }
+  const Config& config() const { return cfg_; }
+
+ private:
+  // One wheel's trigger settings, read from the ping, emote or ask fields of cfg_.
+  struct Spec {
+    Trigger trigger;
+    uint32_t vk;  // only for Trigger::CustomVk
+    bool click;   // trigger + click places a ping / emote instead of replaying the click
+  };
+
+  bool active() const { return enabled_ && !suspended_; }
+  uint32_t mods() const;
+  Spec spec(WheelKind k) const;
+  bool held(WheelKind k) const;
+  bool anyHeld() const;
+  bool isTriggerVk(WheelKind k, uint32_t vk) const;
+  bool isAnyTriggerVk(uint32_t vk) const;
+  bool isMouseTrigger(WheelKind k) const;
+  bool isKeyTrigger(WheelKind k) const;  // a key we swallow: Caps Lock or a custom key
+  uint32_t keyTriggerVk(WheelKind k) const;
+  Btn dragButton(WheelKind k) const;
+  bool clickOn(WheelKind k) const { return spec(k).click; }
+  bool startsGesture(WheelKind k, Btn btn) const;
+  void markSpot();
+  bool anySpotWhileHeld() const;
+  uint32_t tapBit() const;
+  void resetDoubleTap() { tap_ = Tap::Idle; }
+  void onTapKeyDown(uint32_t vk, bool repeat, uint64_t nowMs);
+  void onTapKeyUp(uint32_t vk, uint64_t nowMs, Result& r);
+  void markSwallow();
+  void cancelGesture(Result& r);
+  bool flushHeldBack(uint32_t vk, Result& r);
+  void onKeyDown(const InputEvent& e, Result& r);
+  void onKeyUp(const InputEvent& e, Result& r);
+  void onMouseDown(const InputEvent& e, Result& r);
+  void onMouseUp(const InputEvent& e, Result& r);
+  void onMouseMove(const InputEvent& e, Result& r);
+  void onScroll(const InputEvent& e, Result& r);
+
+  // The double tap of the tap key: Down1 (first down) -> Up1 -> Down2 -> its up asks. Each step must follow the
+  // last within kDoubleTapMs; anything else starts over.
+  enum class Tap { Idle, Down1, Up1, Down2 };
+
+  Config cfg_;
+  bool enabled_ = true;
+  bool suspended_ = false;
+  std::function<bool(int x, int y)> fullscreenProbe_;
+  State state_ = State::Idle;
+  std::array<bool, 256> keyDown_{};
+  std::set<uint32_t> swallowKeyUps_;
+  bool swallowRightUp_ = false;
+  bool needMask_ = false;
+  // A non-modifier key was pressed while a wheel trigger is held (Alt+Tab, Win+Tab, Alt+F4...):
+  // that chord belongs to another program, so clicks pass through until every trigger is released.
+  bool foreignKey_ = false;
+  bool maskMenuKeys_ = true;
+  // Tap-through, so a custom trigger key still types: a lone tap is replayed on release, and a key pressed while
+  // it is held flushes it first. State (custom-key triggers only, 0 = none):
+  // heldBackVk_: the trigger key is down but not sent yet; a drag consumes it, a lone release types it.
+  // typedVk_: the held-back key was flushed because another key was pressed (the user is typing):
+  // its repeats and its real key-up now pass through to the OS.
+  uint32_t heldBackVk_ = 0;
+  uint32_t typedVk_ = 0;
+  WheelKind owner_ = WheelKind::Ping;  // the wheel the current gesture belongs to
+  // Per wheel: a release or click happened while its trigger key was held, so its key-up reports TriggerUp
+  // (the teammate sends an ask's spots then). Indexed by WheelKind.
+  std::array<bool, 3> spotWhileHeld_{};
+  Btn dragBtn_ = Btn::None;
+  int px_ = 0;
+  int py_ = 0;
+  uint64_t lastMouseMs_ = 0;
+  // The panel key we swallowed and have not seen come up (0 = none), and when it last repeated.
+  uint32_t panelDown_ = 0;
+  uint64_t lastPanelMs_ = 0;
+  uint64_t panelRepeatGapMs_ = kPanelRepeatGapMs;
+  int lastX_ = 0;  // last mouse position, for the fullscreen probe on a key press
+  int lastY_ = 0;
+  Tap tap_ = Tap::Idle;
+  uint32_t tapVk_ = 0;  // the physical key of the double tap in progress
+  uint64_t tapMs_ = 0;  // when the last step happened
+  bool staleWatch_ = false;
+  bool scrollSent_ = false;  // a scroll has been reported since the watch went on
+  uint64_t lastScrollMs_ = 0;
+};
+
+}  // namespace lp

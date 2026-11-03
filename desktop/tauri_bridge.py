@@ -193,6 +193,7 @@ def save_settings(payload: dict[str, object]) -> dict[str, object]:
                 if not isinstance(payload[key], dict):
                     raise ValueError("MQTT 配置无效")
                 mqtt_payload = dict(payload[key])
+                mqtt_payload.setdefault("ping_topic", previous_mqtt["ping_topic"])
                 if not mqtt_payload.get("password") and previous_mqtt["password"] and not mqtt_payload.get("clear_password"):
                     mqtt_payload["password"] = previous_mqtt["password"]
                 if mqtt_payload.get("clear_password"):
@@ -203,7 +204,7 @@ def save_settings(payload: dict[str, object]) -> dict[str, object]:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     current_mqtt = _read_mqtt_settings(data)
-    if current_mqtt != previous_mqtt:
+    if any(current_mqtt[key] != previous_mqtt[key] for key in current_mqtt if key != "ping_topic"):
         store = StatusEventStore()
         store.configure_mqtt(bool(current_mqtt["enabled"]))
         if current_mqtt["enabled"]:
@@ -212,7 +213,9 @@ def save_settings(payload: dict[str, object]) -> dict[str, object]:
 
 
 def test_mqtt_connection(_payload: dict[str, object]) -> dict[str, object]:
-    publisher = _mqtt_publisher or MqttPublisher(StatusEventStore(), _mqtt_runtime_settings)
+    if _mqtt_publisher is None:
+        raise RuntimeError("MQTT 后台服务未启动")
+    publisher = _mqtt_publisher
     publisher.test_connection()
     return {"ok": True, "status": "连接成功"}
 
@@ -424,6 +427,8 @@ def main() -> int:
         "settings": lambda _p: settings(),
         "save-settings": save_settings,
         "test-mqtt-connection": test_mqtt_connection,
+        "send-ping": lambda payload: _mqtt_publisher.send_ping(payload) if _mqtt_publisher else None,
+        "take-pings": lambda _payload: _mqtt_publisher.take_pings() if _mqtt_publisher else [],
         "manage-tasks": manage_tasks,
         "data-sources": data_sources,
         "set-data-source": set_data_source,

@@ -1,48 +1,33 @@
-"""Small cross-platform MQTT 3.1.1 publisher for Beacon task events."""
+"""Shared MQTT session for Beacon task events and screen pings."""
 from __future__ import annotations
 
 import json
-import socket
 import ssl
 import threading
 import time
-from dataclasses import dataclass
+import uuid
+from collections import deque
 from typing import Any
 from urllib.parse import urlparse
 
 from .event_store import StatusEventStore
 
 
-def _remaining_length(value: int) -> bytes:
-    encoded = bytearray()
-    while True:
-        digit = value % 128
-        value //= 128
-        if value:
-            digit |= 0x80
-        encoded.append(digit)
-        if not value:
-            return bytes(encoded)
-
-
-def _utf8(value: str) -> bytes:
-    raw = value.encode("utf-8")
-    return len(raw).to_bytes(2, "big") + raw
-
-
-def _packet(kind: int, body: bytes) -> bytes:
-    return bytes((kind,)) + _remaining_length(len(body)) + body
-
-
 def validate_mqtt_settings(raw: dict[str, Any]) -> dict[str, Any]:
     enabled = bool(raw.get("enabled", False))
     target = str(raw.get("target") or "").strip()
     topic = str(raw.get("topic") if "topic" in raw else raw.get("topic_prefix") or "").strip()
+    ping_topic = str(raw.get("ping_topic") or "").strip()
     username = str(raw.get("username") or "").strip()
     password = str(raw.get("password") or "")
     qos = int(raw.get("qos", 1))
-    if (enabled and not topic) or "+" in topic or "#" in topic:
-        raise ValueError("MQTT 发布 Topic 无效")
+    if (enabled and not topic) or any(
+        any(char in name for char in "+#\0") or len(name.encode("utf-8")) > 65535
+        for name in (topic, ping_topic)
+    ):
+        raise ValueError("MQTT Topic 无效")
+    if ping_topic and ping_topic == topic:
+        raise ValueError("状态 Topic 和 Ping Topic 必须不同")
     if qos != 1:
         raise ValueError("当前仅支持 MQTT QoS 1")
     if password and not username:
@@ -60,140 +45,234 @@ def validate_mqtt_settings(raw: dict[str, Any]) -> dict[str, Any]:
         if not 1 <= port <= 65535:
             raise ValueError("MQTT 端口无效")
     return {"enabled": enabled, "target": target, "topic": topic, "qos": qos,
-            "username": username, "password": password}
+            "username": username, "password": password, "ping_topic": ping_topic}
 
 
-@dataclass(frozen=True, slots=True)
-class MqttSettings:
-    enabled: bool
-    target: str
-    topic: str
-    username: str
-    password: str
+PING_KINDS = ("danger", "push", "omw", "allin", "assist", "needvision", "missing", "enemyvision")
+PING_TTL = 5
 
-    @classmethod
-    def from_raw(cls, raw: dict[str, Any]) -> "MqttSettings":
-        value = validate_mqtt_settings(raw)
-        return cls(value["enabled"], value["target"], value["topic"], value["username"], value["password"])
+
+def ping_coordinates(value):
+    return all(type(value.get(axis)) in (int, float) and 0 <= value[axis] <= 1 for axis in ("x", "y"))
 
 
 class MqttPublisher:
-    """Publish the durable outbox in a worker so ingestion never waits on a broker."""
+    """One MQTT session for the durable task outbox and transient desktop pings."""
 
     def __init__(self, store: StatusEventStore, settings_provider) -> None:
         self._store = store
         self._settings_provider = settings_provider
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._thread = None
         self._lock = threading.Lock()
         self._status = "已停用"
+        self._id = uuid.uuid4().hex
+        self._topic = ""
+        self._connected_config = None
+        self._attempted_config = None
+        self._outgoing = deque(maxlen=16)
+        self._incoming = deque(maxlen=32)
+        self._seen = {}
 
-    def start(self) -> None:
+    def start(self):
         if self._thread is None:
             self._thread = threading.Thread(target=self._run, name="beacon-mqtt", daemon=True)
             self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self):
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=2)
+            self._thread.join(timeout=6)
             self._thread = None
 
-    def status(self) -> str:
+    def status(self):
         with self._lock:
             return self._status
 
-    def _set_status(self, value: str) -> None:
+    def send_ping(self, value):
+        if value.get("kind") not in PING_KINDS or not ping_coordinates(value):
+            raise ValueError("Ping 数据无效")
+        now = time.time()
+        created = value.get("time", now)
+        if type(created) not in (int, float) or not now - 1 <= created <= now:
+            return
+        config = self._settings_provider()
         with self._lock:
-            self._status = value
+            if config != self._connected_config or not self._topic:
+                return
+            self._outgoing.append({
+                "v": 1, "id": uuid.uuid4().hex, "sender": self._id, "time": created,
+                "kind": value["kind"], "x": value["x"], "y": value["y"],
+            })
 
-    def _run(self) -> None:
-        while not self._stop.wait(0.25):
-            message = None
+    def take_pings(self):
+        config = self._settings_provider()
+        with self._lock:
+            now = time.time()
+            result = [event for event in self._incoming if config == self._connected_config and now - event["time"] <= PING_TTL]
+            self._incoming.clear()
+            return result
+
+    def _receive(self, _client, _userdata, message):
+        if message.retain or len(message.payload) > 1024:
+            return
+        try:
+            event = json.loads(message.payload)
+        except (ValueError, UnicodeError):
+            return
+        now = time.time()
+        if (
+            not isinstance(event, dict) or event.get("v") != 1
+            or not isinstance(event.get("sender"), str) or len(event["sender"]) != 32
+            or event["sender"] == self._id or event.get("kind") not in PING_KINDS
+            or not isinstance(event.get("id"), str) or len(event["id"]) != 32
+            or type(event.get("time")) not in (int, float)
+            or not now - PING_TTL <= event["time"] <= now + PING_TTL
+            or not ping_coordinates(event)
+        ):
+            return
+        with self._lock:
+            if message.topic != self._topic or event["id"] in self._seen:
+                return
+            self._seen = {key: expiry for key, expiry in self._seen.items() if expiry > now}
+            if len(self._seen) >= 512:
+                return
+            self._seen[event["id"]] = event["time"] + PING_TTL
+            self._incoming.append({key: event[key] for key in ("kind", "x", "y", "time")})
+
+    def test_connection(self):
+        config = self._settings_provider()
+        if not config["enabled"]:
+            raise ValueError("请先启用 MQTT 对外同步")
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            with self._lock:
+                status = self._status
+                if config == self._connected_config:
+                    if status == "已连接":
+                        return
+                    raise ConnectionError(status)
+                if status.startswith("连接失败") and config == self._attempted_config:
+                    raise ConnectionError(status)
+            if self._stop.wait(0.1):
+                break
+        raise ConnectionError(self.status())
+
+    def _run(self):
+        while not self._stop.is_set():
             try:
-                config = MqttSettings.from_raw(self._settings_provider())
-                if not config.enabled:
-                    self._set_status("已停用")
+                config = self._settings_provider()
+                if not config["enabled"]:
+                    with self._lock:
+                        self._status = "已停用"
+                    self._stop.wait(0.25)
                     continue
-                message = self._store.next_mqtt_message()
-                if message is None:
-                    self._set_status("已连接，等待任务变更")
-                    continue
-                self._publish(config, str(message["payload"]))
-                self._store.mark_mqtt_published(int(message["id"]))
-                self._set_status("已连接")
+                with self._lock:
+                    self._attempted_config = config
+                    self._status = "连接中"
+                self._session(config)
             except Exception as exc:
-                self._set_status(f"连接失败：{str(exc)[:120]}")
-                if message is not None:
-                    self._store.mark_mqtt_failed(int(message["id"]), str(exc))
+                with self._lock:
+                    self._status = f"连接失败：{str(exc)[:120]}"
                 self._stop.wait(2)
 
-    def test_connection(self) -> None:
-        config = MqttSettings.from_raw(self._settings_provider())
-        if not config.enabled:
-            raise ValueError("请先启用 MQTT 对外同步")
-        self._connect(config).close()
+    def _session(self, config):
+        import paho.mqtt.client as mqtt
 
-    @staticmethod
-    def _read_packet(connection: socket.socket) -> tuple[int, bytes]:
-        first = connection.recv(1)
-        if not first:
-            raise ConnectionError("MQTT 服务器提前关闭连接")
-        multiplier, remaining = 1, 0
-        while True:
-            digit = connection.recv(1)
-            if not digit:
-                raise ConnectionError("MQTT 数据不完整")
-            remaining += (digit[0] & 127) * multiplier
-            if not digit[0] & 128:
-                break
-            multiplier *= 128
-            if multiplier > 128 ** 3:
-                raise ValueError("MQTT 剩余长度无效")
-        body = bytearray()
-        while len(body) < remaining:
-            chunk = connection.recv(remaining - len(body))
-            if not chunk:
-                raise ConnectionError("MQTT 数据不完整")
-            body.extend(chunk)
-        return first[0], bytes(body)
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="beacon-" + self._id[:16],
+                             clean_session=True, reconnect_on_failure=False)
+        address = urlparse(config["target"])
+        if address.scheme == "mqtts":
+            client.tls_set_context(ssl.create_default_context())
+        if config["username"]:
+            client.username_pw_set(config["username"], config["password"] or None)
+        client.on_message = self._receive
+        subscribed = None
+        subscription_id = None
+        subscription_error = None
 
-    def _connect(self, config: MqttSettings) -> socket.socket:
-        parsed = urlparse(config.target)
-        port = parsed.port or (8883 if parsed.scheme == "mqtts" else 1883)
-        connection = socket.create_connection((str(parsed.hostname), port), timeout=5)
-        connection.settimeout(5)
-        if parsed.scheme == "mqtts":
-            connection = ssl.create_default_context().wrap_socket(connection, server_hostname=parsed.hostname)
-        client_id = "Beacon"
-        flags = 0x02
-        if config.username:
-            flags |= 0x80
-        if config.password:
-            flags |= 0x40
-        connect = _utf8("MQTT") + bytes((4, flags)) + (30).to_bytes(2, "big") + _utf8(client_id)
-        if config.username:
-            connect += _utf8(config.username)
-        if config.password:
-            connect += _utf8(config.password)
-        connection.sendall(_packet(0x10, connect))
-        kind, body = self._read_packet(connection)
-        if kind != 0x20 or len(body) != 2 or body[1] != 0:
-            connection.close()
-            raise ConnectionError(f"MQTT CONNECT 被拒绝（返回码 {body[1] if len(body) > 1 else '未知'}）")
-        return connection
+        def on_subscribe(_client, _userdata, mid, reasons, _properties):
+            nonlocal subscription_id, subscription_error
+            if mid == subscription_id:
+                subscription_id = None
+                if not reasons or reasons[0].is_failure:
+                    subscription_error = "MQTT 服务器拒绝订阅 Ping Topic"
+                else:
+                    with self._lock:
+                        self._topic = subscribed
 
-    def _publish(self, config: MqttSettings, payload: str) -> None:
-        event = json.loads(payload)
-        topic = config.topic
-        connection = self._connect(config)
+        client.on_subscribe = on_subscribe
+        pending = None
+        pending_pings = deque()
         try:
-            packet_id = 1
-            body = _utf8(topic) + packet_id.to_bytes(2, "big") + payload.encode("utf-8")
-            connection.sendall(_packet(0x32, body))
-            kind, ack = self._read_packet(connection)
-            if kind != 0x40 or ack != packet_id.to_bytes(2, "big"):
-                raise ConnectionError("MQTT 未确认消息")
-            connection.sendall(bytes((0xE0, 0x00)))
+            client.connect(address.hostname, address.port or (8883 if address.scheme == "mqtts" else 1883), 30)
+            deadline = time.monotonic() + 5
+            while not self._stop.is_set():
+                latest = self._settings_provider()
+                if any(latest[key] != config[key] for key in ("enabled", "target", "username", "password")):
+                    return
+                result = client.loop(timeout=0.1)
+                if result != mqtt.MQTT_ERR_SUCCESS:
+                    raise ConnectionError(mqtt.error_string(result))
+                if not client.is_connected():
+                    if time.monotonic() > deadline:
+                        raise ConnectionError("MQTT 握手超时")
+                    continue
+                if subscription_id is not None and time.monotonic() > deadline:
+                    subscription_id = None
+                    subscription_error = "Ping Topic 订阅超时"
+                if subscription_id is None and subscribed != latest["ping_topic"]:
+                    with self._lock:
+                        self._topic = ""
+                        self._connected_config = None
+                        self._status = "正在订阅 Ping Topic"
+                        self._incoming.clear()
+                        self._outgoing.clear()
+                    if subscribed:
+                        client.unsubscribe(subscribed)
+                    subscribed = latest["ping_topic"]
+                    subscription_error = None
+                    if subscribed:
+                        result, subscription_id = client.subscribe(subscribed, qos=1)
+                        if result != mqtt.MQTT_ERR_SUCCESS:
+                            raise ConnectionError(mqtt.error_string(result))
+                        deadline = time.monotonic() + 5
+                if subscription_id is None:
+                    with self._lock:
+                        self._status = f"已连接，{subscription_error}" if subscription_error else "已连接"
+                        self._connected_config = latest
+                        outgoing = list(self._outgoing)
+                        self._outgoing.clear()
+                    while pending_pings and pending_pings[0][0].is_published():
+                        pending_pings.popleft()
+                    if pending_pings and time.monotonic() >= pending_pings[0][1]:
+                        raise ConnectionError("MQTT 未确认 Ping 消息")
+                    for event in outgoing[:16 - len(pending_pings)]:
+                        if time.time() - event["time"] <= 1:
+                            info = client.publish(subscribed, json.dumps(event), qos=1)
+                            if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                                raise ConnectionError(mqtt.error_string(info.rc))
+                            pending_pings.append((info, time.monotonic() + 5))
+                if pending:
+                    message, info, expiry = pending
+                    if info.is_published():
+                        self._store.mark_mqtt_published(int(message["id"]))
+                        pending = None
+                    elif time.monotonic() >= expiry:
+                        raise ConnectionError("MQTT 未确认状态消息")
+                if pending is None and (message := self._store.next_mqtt_message()):
+                    info = client.publish(latest["topic"], message["payload"], qos=1)
+                    if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                        raise ConnectionError(mqtt.error_string(info.rc))
+                    pending = (message, info, time.monotonic() + 5)
+        except Exception as exc:
+            if pending:
+                self._store.mark_mqtt_failed(int(pending[0]["id"]), str(exc))
+            raise
         finally:
-            connection.close()
+            with self._lock:
+                self._topic = ""
+                self._connected_config = None
+                self._incoming.clear()
+                self._outgoing.clear()
+            client.disconnect()

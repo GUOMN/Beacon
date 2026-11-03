@@ -42,3 +42,11 @@ python -m pip install -r ../requirements.txt
 ```
 
 Python 后台不可用时，界面会显示任务数据错误；蓝牙由应用主进程独立管理，不依赖用户安装 Python 或 Bleak。
+
+## 屏幕标记
+
+Windows 和 macOS 上，按住 Alt（macOS 上是 Option），按住鼠标左键拖向轮盘的一格后松开，即可在起点显示标记。Ctrl + Alt + P 暂停或恢复。macOS 首次使用时，在「系统设置 → 隐私与安全性 → 辅助功能」授权 Beacon 的 `beacon-ping-hook`，然后重新启动 Beacon。辅助进程位于 Beacon 的本地应用数据目录。
+
+要跨客户端共享标记，在 MQTT 设置中启用连接并填写同一个服务器地址和同一个 Ping Topic，例如 `beacon/ping/team-a`。状态 Topic 用于任务状态，需和 Ping Topic 分开。两者共用一个 MQTT 会话。接收端把远端标记投到主屏幕的相对位置。断线时，本地标记仍会显示。
+
+输入辅助进程来自 lolPing v0.6.0，源码和 MIT 许可位于 `src-tauri/native/ping-hook`。构建 Windows 版需要 Visual Studio C++ 工具链，构建 macOS 版需要 Xcode 的 C++ 工具链。

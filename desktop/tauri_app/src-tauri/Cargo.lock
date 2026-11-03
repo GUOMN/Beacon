@@ -536,6 +536,7 @@ version = "1.0.1"
 dependencies = [
  "base64 0.22.1",
  "btleplug",
+ "cc",
  "libloading 0.8.9",
  "notify",
  "objc2 0.6.4",

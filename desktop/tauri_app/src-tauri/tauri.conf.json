@@ -4,14 +4,21 @@
   "version": "1.0.1",
   "identifier": "com.codexstatus.bridge",
   "build": {"beforeDevCommand":"node node_modules/vite/bin/vite.js","devUrl":"http://localhost:1420","beforeBuildCommand":"node node_modules/typescript/bin/tsc && node node_modules/vite/bin/vite.js build","frontendDist":"../dist"},
-  "app": {"windows":[{"title":"Beacon · 信标","width":1180,"height":760,"minWidth":880,"minHeight":640,"center":true,"decorations":true,"transparent":false}],"security":{"csp":null}},
+  "app": {"macOSPrivateApi":true,"windows":[{"title":"Beacon · 信标","width":1180,"height":760,"minWidth":880,"minHeight":640,"center":true,"decorations":true,"transparent":false}],"security":{
+    "csp": null,
+    "capabilities": [
+      {"identifier":"main-events","windows":["main"],"permissions":["core:event:allow-listen","core:event:allow-unlisten","core:app:allow-version"]},
+      {"identifier":"ping-events","windows":["ping-overlay"],"permissions":["core:event:allow-listen","core:event:allow-unlisten"]}
+    ]
+  }},
   "bundle": {
     "active": true,
     "targets": "all",
     "resources": {
       "../../tauri_bridge.py": "tauri_bridge.py",
       "../../codex_status_core": "codex_status_core",
-      "binaries": "binaries"
+      "binaries": "binaries",
+      "native/ping-hook/LICENSE": "licenses/lolPing-MIT.txt"
     },
     "icon": [
       "icons/32x32.png",

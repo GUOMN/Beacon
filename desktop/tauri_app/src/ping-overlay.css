@@ -1,0 +1,47 @@
+html.ping-view, html.ping-view body, html.ping-view #root {
+  background: transparent !important;
+  margin: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.beacon-ping-wheel, .beacon-ping-marker {
+  position: fixed;
+  translate: -50% -50%;
+  display: grid;
+  place-items: center;
+  font: 700 23px system-ui, sans-serif;
+}
+
+.beacon-ping-wheel {
+  width: 170px;
+  height: 170px;
+  border-radius: 50%;
+  border: 1px solid #7d93a9;
+  background: #0d1928df;
+}
+
+.beacon-ping-wheel > div, .beacon-ping-marker {
+  display: grid;
+  place-items: center;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  background: #0d1928;
+  width: 36px;
+  height: 36px;
+}
+
+.beacon-ping-wheel > div { position: absolute; translate: -50% -50%; opacity: .72; }
+.beacon-ping-wheel .selected { opacity: 1; box-shadow: 0 0 14px currentColor; }
+.ping-danger, .ping-enemyvision { color: #ff6978; }
+.ping-omw, .ping-needvision { color: #76daff; }
+.ping-push, .ping-assist { color: #9efaaf; }
+.ping-allin, .ping-missing { color: #ffd576; }
+
+.beacon-ping-marker { animation: beacon-ping 1.4s ease-out both; }
+@keyframes beacon-ping {
+  0% { scale: .65; }
+  20% { scale: 1.15; }
+  75% { opacity: 1; }
+  100% { opacity: 0; }
+}
