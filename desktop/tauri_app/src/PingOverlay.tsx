@@ -1,78 +1,157 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { Wheel } from "./ping/renderer/overlay/wheel";
+import { emoteFxContent } from "./ping/renderer/shared/emoteFx";
+import { EMOTE_DURATION_S } from "./ping/shared/emotes";
+import { imageSize } from "./ping/shared/imageSniff";
+import { builtInMarkers, defaultPreferences, emptyIcon, playBuiltInSound, playMarkerSound, readPreferences, soundIcon, type StoredPreferences } from "./ping/preferences";
+import "./ping/renderer/shared/emoteFx.css";
 import "./ping-overlay.css";
 
-const icons = { danger: "!", push: "↗", omw: "➜", allin: "◆", assist: "+", needvision: "◈", missing: "?", enemyvision: "⊘" };
-type Kind = keyof typeof icons;
 type Point = { x: number; y: number };
-type Ping = Point & { kind: Kind };
+type Marker = Point & { kind: string; image?: string; fx?: number };
 type OverlayEvent =
-  | ({ type: "open" } & Point)
-  | { type: "select"; kind: Kind | null }
-  | { type: "close" | "clear" }
-  | { type: "marker"; ping: Ping };
+  | ({ type: "wheelOpen" | "wheelMove" | "wheelRelease" | "click" } & Point)
+  | { type: "close" | "clear" | "preferences" }
+  | { type: "marker"; ping: Marker };
 
-const position = (point: Point) => ({
-  left: `${point.x * 100}%`,
-  top: `${point.y * 100}%`,
-});
+function sharedImage(url: string | undefined): string | undefined {
+  if (!url || url.length > 16_420 || !/^data:image\/(?:webp|png);base64,[A-Za-z0-9+/]+=*$/.test(url)) return;
+  try {
+    const bytes = Uint8Array.from(atob(url.split(",")[1]), char => char.charCodeAt(0));
+    const size = imageSize(bytes);
+    if (size && size.width <= 160 && size.height <= 160) return url;
+  } catch {
+    return;
+  }
+}
 
 export default function PingOverlay() {
-  const [wheel, setWheel] = useState<Point | null>(null);
-  const [selected, setSelected] = useState<Kind | null>(null);
-  const [markers, setMarkers] = useState<(Ping & { id: number })[]>([]);
+  const pingSvg = useRef<SVGSVGElement>(null);
+  const stage = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (!pingSvg.current || !stage.current) return;
+    const layer = stage.current;
+    const svg = pingSvg.current;
+    svg.replaceChildren();
+    const wheel = new Wheel(svg, "标记", emptyIcon, () => {});
     let disposed = false;
-    let id = 0;
+    let prefs = defaultPreferences;
+    let configRequest = 0;
     const timers = new Set<number>();
+
+    const apply = async () => {
+      const request = ++configRequest;
+      const stored = await invoke<StoredPreferences>("ping_preferences");
+      if (disposed || request !== configRequest) return;
+      prefs = readPreferences(stored);
+      wheel.cancel();
+      const item = (key: string) => {
+        const builtIn = builtInMarkers.find(marker => marker.id === key);
+        const custom = prefs.custom.find(marker => marker.id === key);
+        return { key, icon: builtIn?.icon ?? custom?.still ?? (custom?.sound ? soundIcon : emptyIcon),
+          label: builtIn?.name ?? custom?.name };
+      };
+      wheel.setItems(prefs.wheel.map(item));
+      wheel.setCenterIcon(item(prefs.clickMarker).icon);
+      wheel.setSize(prefs.wheelSize);
+    };
+
+    const render = (marker: Marker, localImage?: string) => {
+      const icon = builtInMarkers.find(item => item.id === marker.kind)?.icon;
+      const url = marker.kind === "emote" ? localImage ?? sharedImage(marker.image) : icon;
+      if (!url) return;
+      const element = document.createElement("div");
+      const emote = marker.kind === "emote";
+      const seconds = emote ? EMOTE_DURATION_S : prefs.duration;
+      element.style.left = `${marker.x * 100}%`;
+      element.style.top = `${marker.y * 100}%`;
+      if (emote) {
+        element.className = "emote";
+        element.style.setProperty("--size", `${prefs.markerSize}px`);
+        element.append(emoteFxContent(marker.fx ?? 0, url));
+      } else {
+        element.className = "beacon-ping-marker";
+        element.style.width = element.style.height = `${prefs.markerSize}px`;
+        element.style.animationDuration = `${seconds}s`;
+        const image = document.createElement("img");
+        image.src = url;
+        image.alt = "";
+        element.append(image);
+      }
+      if (layer.childElementCount >= 16) layer.firstElementChild?.remove();
+      layer.append(element);
+      const timer = window.setTimeout(() => {
+        timers.delete(timer);
+        element.remove();
+      }, seconds * 1000);
+      timers.add(timer);
+    };
+
+    const place = (key: string, point: Point) => {
+      const builtIn = builtInMarkers.find(item => item.id === key);
+      const custom = prefs.custom.find(item => item.id === key);
+      if (!builtIn && !custom) return;
+      let marker: Marker;
+      if (custom?.still) {
+        marker = { ...point, kind: "emote", image: custom.still, fx: custom.fx ?? 0 };
+        render(marker, custom.animation ?? custom.still);
+      } else {
+        marker = { ...point, kind: builtIn?.id ?? "attention" };
+        render(marker);
+      }
+      if (builtIn) playBuiltInSound(builtIn.frequency, prefs.volume);
+      if (custom?.sound) playMarkerSound(custom.sound, prefs.volume);
+      void invoke("bridge_action", {
+        action: "send-ping", payload: { ...marker, time: Date.now() / 1000 },
+      }).catch(console.error);
+    };
+
     const subscription = listen<OverlayEvent>("beacon-ping-overlay", ({ payload }) => {
       if (disposed) return;
-      switch (payload.type) {
-        case "open":
-          setWheel(payload);
-          setSelected(null);
-          break;
-        case "select":
-          setSelected(payload.kind);
-          break;
-        case "clear":
-          setMarkers([]);
-          setWheel(null);
-          break;
-        case "close":
-          setWheel(null);
-          break;
-        case "marker": {
-          const marker = { ...payload.ping, id: ++id };
-          setMarkers(previous => [...previous.slice(-15), marker]);
-          const timer = window.setTimeout(() => {
-            timers.delete(timer);
-            setMarkers(previous => previous.filter(item => item.id !== marker.id));
-          }, 1400);
-          timers.add(timer);
-          break;
+      if (payload.type === "preferences") {
+        void apply().catch(console.error);
+      } else if (payload.type === "close" || payload.type === "clear") {
+        wheel.cancel();
+        if (payload.type === "clear") layer.replaceChildren();
+      } else if (payload.type === "marker") {
+        render(payload.ping);
+        const builtIn = builtInMarkers.find(item => item.id === payload.ping.kind);
+        if (builtIn) playBuiltInSound(builtIn.frequency, prefs.volume);
+      } else if ("x" in payload) {
+        const x = payload.x * window.innerWidth;
+        const y = payload.y * window.innerHeight;
+        if (payload.type === "wheelOpen") {
+          wheel.open(x, y);
+        } else if (payload.type === "wheelMove") {
+          wheel.move(x, y);
+        } else if (payload.type === "wheelRelease") {
+          const choice = wheel.release(x, y);
+          if (choice) place(choice.key, {
+            x: choice.x / window.innerWidth, y: choice.y / window.innerHeight,
+          });
+        } else {
+          place(prefs.clickMarker, { x: payload.x, y: payload.y });
         }
       }
     });
-    void subscription.then(() => {
-      if (!disposed) return invoke("start_ping_overlay");
+    void subscription.then(async () => {
+      if (disposed) return;
+      await apply();
+      if (!disposed) await invoke("start_ping_overlay");
     }).catch(console.error);
     return () => {
       disposed = true;
       void subscription.then(unlisten => unlisten()).catch(console.error);
       timers.forEach(timer => window.clearTimeout(timer));
+      layer.replaceChildren();
     };
   }, []);
 
   return <>
-    {markers.map(marker => <div className={`beacon-ping-marker ping-${marker.kind}`} key={marker.id} style={position(marker)}>{icons[marker.kind]}</div>)}
-    {wheel && <div className="beacon-ping-wheel" style={position(wheel)}>
-      {(Object.keys(icons) as Kind[]).map((kind, index) => <div key={kind} style={{
-        left: `${50 + Math.sin(index * Math.PI / 4) * 34}%`,
-        top: `${50 - Math.cos(index * Math.PI / 4) * 34}%`,
-      }} className={`ping-${kind}${selected === kind ? " selected" : ""}`}>{icons[kind]}</div>)}
-    </div>}
+    <div ref={stage} className="beacon-marker-stage"/>
+    <svg ref={pingSvg} id="wheel" viewBox="-300 -300 600 600"/>
   </>;
 }

@@ -2055,7 +2055,10 @@ fn start_ping_overlay() -> Result<(), String> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use ping::start_ping_overlay;
+use ping::{ping_input_status, ping_preferences, save_ping_preferences, start_ping_overlay, suspend_ping_input};
+
+#[cfg(target_os = "macos")]
+use ping::open_ping_accessibility;
 
 #[tauri::command]
 async fn bridge_action(
@@ -2460,6 +2463,16 @@ pub fn run() {
             ota_progress,
             bridge_action,
             start_ping_overlay,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            ping_input_status,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            ping_preferences,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            save_ping_preferences,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            suspend_ping_input,
+            #[cfg(target_os = "macos")]
+            open_ping_accessibility,
             sync_widget_context,
             open_main_window
         ])

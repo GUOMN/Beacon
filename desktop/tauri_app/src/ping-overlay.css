@@ -5,43 +5,27 @@ html.ping-view, html.ping-view body, html.ping-view #root {
   overflow: hidden;
 }
 
-.beacon-ping-wheel, .beacon-ping-marker {
-  position: fixed;
+.beacon-marker-stage { position: fixed; inset: 0; pointer-events: none; }
+.beacon-ping-marker {
+  position: absolute;
   translate: -50% -50%;
-  display: grid;
-  place-items: center;
-  font: 700 23px system-ui, sans-serif;
+  animation: beacon-ping 1.4s ease-out both;
 }
-
-.beacon-ping-wheel {
-  width: 170px;
-  height: 170px;
-  border-radius: 50%;
-  border: 1px solid #7d93a9;
-  background: #0d1928df;
-}
-
-.beacon-ping-wheel > div, .beacon-ping-marker {
-  display: grid;
-  place-items: center;
-  border: 2px solid currentColor;
-  border-radius: 50%;
-  background: #0d1928;
-  width: 36px;
-  height: 36px;
-}
-
-.beacon-ping-wheel > div { position: absolute; translate: -50% -50%; opacity: .72; }
-.beacon-ping-wheel .selected { opacity: 1; box-shadow: 0 0 14px currentColor; }
-.ping-danger, .ping-enemyvision { color: #ff6978; }
-.ping-omw, .ping-needvision { color: #76daff; }
-.ping-push, .ping-assist { color: #9efaaf; }
-.ping-allin, .ping-missing { color: #ffd576; }
-
-.beacon-ping-marker { animation: beacon-ping 1.4s ease-out both; }
+.beacon-ping-marker img { width: 100%; height: 100%; }
 @keyframes beacon-ping {
   0% { scale: .65; }
   20% { scale: 1.15; }
   75% { opacity: 1; }
   100% { opacity: 0; }
 }
+#wheel {
+  position: absolute; left: 0; top: 0; width: 600px; height: 600px; margin: -300px 0 0 -300px;
+  pointer-events: none; opacity: 0; transform: scale(.85); transition: opacity .12s ease-out, transform .12s ease-out;
+}
+#wheel.open { opacity: 1; transform: scale(1); }
+#wheel .icon {
+  transform-box: fill-box; transform-origin: center;
+}
+#wheel .icon.hot { transform: scale(1.18); }
+#wheel .centerTxt { font: 600 15px "Segoe UI", sans-serif; letter-spacing: 1px; fill: #1fa9e0; }
+#wheel .backTxt { font: 600 9px "Segoe UI", sans-serif; fill: #6c7a7c; letter-spacing: .5px; }

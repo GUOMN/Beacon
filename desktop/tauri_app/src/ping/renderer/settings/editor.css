@@ -1,0 +1,156 @@
+.card.wheelEditor { display: block; padding: 16px 20px 12px; }
+.card.wheelEditor:hover { background: var(--card); }
+.weHead { display: flex; align-items: flex-start; gap: 16px; }
+.weHead .lbl { flex: 1; }
+.weBody { display: grid; grid-template-columns: 300px 1fr; gap: 24px; align-items: center; margin-top: 14px; }
+.weWheel { position: relative; }
+.weWheel svg { position: absolute; inset: 0; }
+.weWedge { fill: rgba(10,14,22,.78); stroke: rgba(200,170,110,.35); stroke-width: 1; transition: fill var(--durationFast) var(--curveEasyEase); }
+.weWedge.hot { fill: rgba(60,120,170,.55); }
+.weSlot { position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px; display: grid; place-items: center; border-radius: 50%; cursor: grab; }
+.weSlot img { width: 46px; height: 46px; pointer-events: none; transition: transform var(--durationFast) var(--curveDecelerateMid); filter: drop-shadow(0 2px 3px rgba(0,0,0,.5)); }
+.weSlot:hover img, .weSlot.hot img { transform: scale(1.15); }
+.weCenter { position: absolute; left: 50%; top: 50%; width: 92px; height: 92px; margin: -46px 0 0 -46px; border-radius: 50%; display: grid; place-items: center; align-content: center;
+  background: radial-gradient(circle, rgba(20,26,38,.95), rgba(10,14,22,.9)); border: 1px solid rgba(200,170,110,.35); cursor: grab;
+  transition: box-shadow var(--durationFast) var(--curveEasyEase), opacity var(--durationNormal) var(--curveEasyEase); }
+.weCenter img { width: 40px; height: 40px; pointer-events: none; }
+.weCenter span { font-size: 10px; font-weight: 600; letter-spacing: .08em; color: #1fa9e0; pointer-events: none; }
+.weCenter.hot { box-shadow: 0 0 0 3px var(--colorBrandStroke1); }
+.weCenter.off { opacity: .45; }
+.weSlot.picked, .weCenter.picked { outline: 2px dashed var(--colorBrandStroke1); outline-offset: 2px; }
+.weSlot:focus-visible, .weCenter:focus-visible, .weTile:focus-visible { outline: 2px solid var(--colorStrokeFocus2); }
+.wePoolTitle { font-size: 12px; font-weight: 600; }
+/* The padding is the room focus rings need inside the scroll box (a long pool scrolls); the negative margin cancels it. */
+.weTiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; margin: 7px -3px -3px; padding: 3px; max-height: 380px; overflow-y: auto; }
+.weCell { position: relative; display: flex; }
+.weCell > .weTile { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.weTile { position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 2px 6px; border-radius: 6px; font-size: 11px; line-height: 14px; text-align: center;
+  user-select: none; cursor: grab; background: var(--colorNeutralBackground1); border: 1px solid var(--colorNeutralStroke1); color: var(--colorNeutralForeground2); }
+.weTile:hover { background: var(--colorNeutralBackground1Hover); transform: translateY(-1px); }
+.weTile:active { transform: scale(.97); }
+.weTile.picked { outline: 2px solid var(--colorBrandStroke1); outline-offset: -1px; }
+.weTile img { width: 34px; height: 34px; pointer-events: none; }
+.weNew { position: absolute; top: 3px; left: 4px; font-size: 9px; font-weight: 600; color: var(--colorBrandForeground1); }
+.weWhere { position: absolute; top: 3px; right: 4px; font-size: 10px; color: var(--text3); }
+.weRemove { position: absolute; top: 3px; right: 3px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; font-size: 12px; cursor: pointer;
+  background: var(--colorNeutralBackground3); color: var(--colorNeutralForeground2); opacity: .75; }
+.weRemove:hover, .weRemove:focus-visible { opacity: 1; background: var(--colorNeutralBackground3Hover); }
+.weRemove:focus-visible { outline: 2px solid var(--colorStrokeFocus2); }
+.weCell.removable .weWhere { right: auto; left: 4px; }
+.weTool { position: absolute; bottom: 3px; right: 3px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; font-size: 12px; cursor: pointer;
+  background: var(--colorNeutralBackground3); color: var(--colorNeutralForeground3); opacity: .75; }
+.weTool.on { color: var(--colorBrandForeground1); opacity: 1; }
+.weTool:hover, .weTool:focus-visible { opacity: 1; background: var(--colorNeutralBackground3Hover); }
+.weTool:focus-visible { outline: 2px solid var(--colorStrokeFocus2); }
+.wePool.filesOver .weTiles { outline: 2px dashed var(--colorBrandStroke1); outline-offset: -1px; border-radius: 6px; }
+
+/* The effect picker, fixed to the viewport (WheelEditor renders it once, at the cursor): a grid of tiles, each playing
+   one effect live on the emote's own image. The stages are dark on purpose — the glows are screen-blended light, and
+   they read over a dark backdrop like they do over the game. */
+.fxPicker {
+  position: fixed; z-index: 100; display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; width: 308px;
+  max-height: calc(100vh - 16px); overflow-y: auto; padding: 2px 8px 8px; border-radius: 8px;
+  background: var(--colorNeutralBackground1); border: 1px solid var(--colorNeutralStroke1);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
+}
+.fxPickerTitle { grid-column: 1 / -1; padding: 6px 4px 4px; font-size: 11px; font-weight: 600; color: var(--colorNeutralForeground3); }
+.fxCell { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 2px 5px; border: 0; border-radius: 6px; background: none; font: inherit; cursor: pointer; }
+.fxCell:hover { background: var(--colorNeutralBackground1Hover); }
+.fxCell.current { outline: 2px solid var(--colorBrandStroke1); outline-offset: -1px; }
+.fxStage { position: relative; display: block; flex: none; border-radius: 5px; overflow: hidden;
+  background: radial-gradient(120% 130% at 50% 18%, #233641 0%, #0b1318 78%); }
+.fxName { max-width: 88px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 14px; color: var(--colorNeutralForeground2); }
+/* Add image… sits under the scroll box, so it stays in view however far the pool is scrolled. */
+.weImport { display: grid; gap: 4px; margin-top: 10px; }
+.weImportRow { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.weImportError { font-size: 12px; line-height: 16px; color: #ff9c48; overflow-wrap: anywhere; }
+.weHint { min-height: 16px; margin-top: 10px; font-size: 12px; line-height: 16px; color: var(--text3); }
+@media (max-width: 860px) { .weBody { grid-template-columns: 1fr; justify-items: center; } }
+
+
+.ping-settings {
+  display: grid;
+  gap: 16px;
+  --colorBrandStroke1: #57a7eb;
+  --colorStrokeFocus2: #57a7eb;
+  --colorNeutralBackground1: var(--card, #172332);
+  --colorNeutralBackground1Hover: #263950;
+  --colorNeutralBackground3: #314763;
+  --colorNeutralBackground3Hover: #425f82;
+  --colorNeutralStroke1: #476381;
+  --colorNeutralForeground2: var(--text, #e5effa);
+  --colorNeutralForeground3: var(--text, #bfccda);
+}
+.ping-settings .desc { display: block; font-size: 12px; opacity: .75; }
+.ping-controls { padding: 16px 20px; display: grid; gap: 12px; justify-items: start; }
+.ping-controls code { overflow-wrap: anywhere; }
+.ping-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 12px; width: 100%; }
+.ping-options label { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.ping-options input[type="range"] { width: 100%; }
+.ping-preview { width: 110px; height: 110px; object-fit: contain; }
+
+.ping-settings {
+  --colorBrandStroke1: #4d9ee6;
+  --colorNeutralBackground1: var(--card, #fff);
+  --colorNeutralBackground1Hover: color-mix(in srgb, var(--colorNeutralBackground1) 89%, #5b9bea);
+  --colorNeutralBackground3: var(--colorNeutralBackground1Hover);
+  --colorNeutralStroke1: color-mix(in srgb, currentColor 17%, transparent);
+  --colorNeutralForeground2: currentColor;
+  --colorNeutralForeground3: currentColor;
+}
+.ping-settings .card { border-radius: 16px; }
+.ping-settings h2, .ping-settings p { margin: 0; }
+.ping-status {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+.ping-status > p { grid-column: 1 / -1; opacity: .72; font-size: 13px; }
+.ping-kicker { display: block; margin-bottom: 4px; font-size: 11px; letter-spacing: .08em; opacity: .68; }
+.ping-save { grid-column: 2; grid-row: 1; display: flex; align-items: center; gap: 10px; }
+.ping-save [role="status"] { max-width: 160px; font-size: 12px; }
+.ping-options { align-items: start; }
+.ping-options > label, .ping-options > div {
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 10px;
+  padding: 10px 12px;
+  min-height: 58px;
+  box-sizing: border-box;
+}
+.ping-settings .weHead .lbl { font-size: 19px; font-weight: 650; }
+.ping-settings .weHead .desc { margin-top: 4px; font-weight: 400; }
+.ping-settings .weBody {
+  grid-template-columns: 316px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 20px;
+}
+.ping-settings .weWheel {
+  align-self: center;
+  justify-self: center;
+  border-radius: 50%;
+  background: radial-gradient(circle, #203752, #111d30 62%, transparent 72%);
+}
+.ping-settings .weWedge { fill: #17273d; stroke: #476485; transition: fill 140ms ease; }
+.ping-settings .weWedge.hot { fill: #315a80; }
+.ping-settings .weSlot img { width: 48px; height: 48px; object-fit: contain; }
+.ping-settings .weCenter { background: #0e2035; border-color: #436281; }
+.ping-settings .weCenter.off { opacity: .78; }
+.ping-settings .wePool {
+  padding: 14px;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 12px;
+}
+.ping-settings .wePoolTitle { font-size: 15px; margin-bottom: 4px; }
+.ping-settings .weTiles { gap: 8px; margin-top: 10px; }
+.ping-settings .weTile { min-height: 72px; padding-top: 14px; border-radius: 10px; }
+.ping-settings .weTile img { width: 38px; height: 38px; object-fit: contain; }
+.ping-settings .weWhere { color: inherit; opacity: .65; }
+.ping-settings .weImport { padding-top: 10px; margin-top: 12px; border-top: 1px solid var(--colorNeutralStroke1); }
+.ping-settings .weImport label { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 12px; }
+.ping-settings input[type="file"] { max-width: 100%; }
+@media (max-width: 900px) {
+  .ping-settings .weBody { grid-template-columns: 1fr; justify-items: stretch; }
+}
+@media (max-width: 520px) {
+  .ping-status { grid-template-columns: 1fr; }
+  .ping-save { grid-column: 1; grid-row: auto; }
+}

@@ -35,6 +35,7 @@ struct Config {
   Trigger trigger = Trigger::Alt;  // the ping wheel's
   uint32_t triggerVk = 0;          // only for Trigger::CustomVk
   bool clickPing = false;
+  bool mappedKey = false;  // a remapped mouse button sends the configured virtual key
   // Fullscreen apps (games) keep every click. Off here so a config without the field changes nothing;
   // the app's setting defaults it on.
   bool gameCheck = false;
@@ -174,6 +175,7 @@ class Decision {
   State state_ = State::Idle;
   std::array<bool, 256> keyDown_{};
   std::set<uint32_t> swallowKeyUps_;
+  bool swallowLeftUp_ = false;
   bool swallowRightUp_ = false;
   bool needMask_ = false;
   // A non-modifier key was pressed while a wheel trigger is held (Alt+Tab, Win+Tab, Alt+F4...):
@@ -195,6 +197,7 @@ class Decision {
   int px_ = 0;
   int py_ = 0;
   uint64_t lastMouseMs_ = 0;
+  uint64_t mappedPressMs_ = 0;
   // The panel key we swallowed and have not seen come up (0 = none), and when it last repeated.
   uint32_t panelDown_ = 0;
   uint64_t lastPanelMs_ = 0;

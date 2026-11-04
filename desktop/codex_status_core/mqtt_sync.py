@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import ssl
 import threading
 import time
@@ -48,8 +49,22 @@ def validate_mqtt_settings(raw: dict[str, Any]) -> dict[str, Any]:
             "username": username, "password": password, "ping_topic": ping_topic}
 
 
-PING_KINDS = ("danger", "push", "omw", "allin", "assist", "needvision", "missing", "enemyvision")
+PING_KINDS = ("attention", "idea", "question", "wait", "help", "review", "done", "thanks")
+EMOTE_IMAGE = re.compile(r"data:image/(?:webp|png);base64,[A-Za-z0-9+/]+={0,2}")
+MAX_EMOTE_URL = 16_420
 PING_TTL = 5
+
+
+def marker_data(value):
+    kind = value.get("kind")
+    if kind in PING_KINDS:
+        return {"kind": kind}
+    if kind == "emote":
+        image, fx = value.get("image"), value.get("fx", 0)
+        if isinstance(image, str) and len(image) <= MAX_EMOTE_URL and EMOTE_IMAGE.fullmatch(image):
+            if type(fx) is int and 0 <= fx < 6:
+                return {"kind": kind, "image": image, "fx": fx}
+    return None
 
 
 def ping_coordinates(value):
@@ -90,7 +105,8 @@ class MqttPublisher:
             return self._status
 
     def send_ping(self, value):
-        if value.get("kind") not in PING_KINDS or not ping_coordinates(value):
+        marker = marker_data(value)
+        if marker is None or not ping_coordinates(value):
             raise ValueError("Ping 数据无效")
         now = time.time()
         created = value.get("time", now)
@@ -102,7 +118,7 @@ class MqttPublisher:
                 return
             self._outgoing.append({
                 "v": 1, "id": uuid.uuid4().hex, "sender": self._id, "time": created,
-                "kind": value["kind"], "x": value["x"], "y": value["y"],
+                **marker, "x": value["x"], "y": value["y"],
             })
 
     def take_pings(self):
@@ -114,22 +130,25 @@ class MqttPublisher:
             return result
 
     def _receive(self, _client, _userdata, message):
-        if message.retain or len(message.payload) > 1024:
+        if message.retain or len(message.payload) > MAX_EMOTE_URL + 512:
             return
         try:
             event = json.loads(message.payload)
-        except (ValueError, UnicodeError):
+        except (ValueError, RecursionError):
             return
         now = time.time()
         if (
             not isinstance(event, dict) or event.get("v") != 1
             or not isinstance(event.get("sender"), str) or len(event["sender"]) != 32
-            or event["sender"] == self._id or event.get("kind") not in PING_KINDS
+            or event["sender"] == self._id
             or not isinstance(event.get("id"), str) or len(event["id"]) != 32
             or type(event.get("time")) not in (int, float)
             or not now - PING_TTL <= event["time"] <= now + PING_TTL
             or not ping_coordinates(event)
         ):
+            return
+        marker = marker_data(event)
+        if marker is None:
             return
         with self._lock:
             if message.topic != self._topic or event["id"] in self._seen:
@@ -138,7 +157,7 @@ class MqttPublisher:
             if len(self._seen) >= 512:
                 return
             self._seen[event["id"]] = event["time"] + PING_TTL
-            self._incoming.append({key: event[key] for key in ("kind", "x", "y", "time")})
+            self._incoming.append({**marker, "x": event["x"], "y": event["y"], "time": event["time"]})
 
     def test_connection(self):
         config = self._settings_provider()

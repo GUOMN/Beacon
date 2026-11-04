@@ -73,6 +73,7 @@ Command parseCommand(const std::string& line, const Config& current) {
     Config cfg = current;
     if (m.count("trigger") != 0 && !parseTrigger(m["trigger"], cfg.trigger)) return c;
     cfg.triggerVk = static_cast<uint32_t>(getInt(m, "triggerVk", cfg.triggerVk));
+    cfg.mappedKey = getBool(m, "mappedKey", cfg.mappedKey);
     cfg.clickPing = getBool(m, "clickPing", cfg.clickPing);
     cfg.gameCheck = getBool(m, "gameCheck", cfg.gameCheck);
     if (m.count("emoteTrigger") != 0 && !parseEmoteTrigger(m["emoteTrigger"], cfg.emoteTrigger)) return c;

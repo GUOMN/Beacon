@@ -136,6 +136,7 @@ Btn Decision::dragButton(WheelKind k) const {
 
 // A press starts a gesture for this wheel: its side button, or the left button while its key is held.
 bool Decision::startsGesture(WheelKind k, Btn btn) const {
+  if (k == WheelKind::Ping && cfg_.mappedKey) return false;
   return btn == dragButton(k) && (isMouseTrigger(k) || held(k));
 }
 
@@ -220,7 +221,7 @@ void Decision::onTapKeyUp(uint32_t vk, uint64_t nowMs, Result& r) {
 void Decision::cancelGesture(Result& r) {
   if (state_ == State::Pending || state_ == State::Wheel) {
     r.emits.push_back(Emit{Emit::Kind::Cancel});
-    state_ = State::SwallowUp;
+    state_ = dragBtn_ == Btn::None ? State::Idle : State::SwallowUp;
   }
 }
 
@@ -282,7 +283,7 @@ Result Decision::tick(uint64_t nowMs) {
     r.emits.push_back(Emit{Emit::Kind::Cancel});
     // The press was swallowed, so its up must be swallowed too. If the up was really lost,
     // the next drag-button down resets SwallowUp to Idle.
-    state_ = State::SwallowUp;
+    state_ = dragBtn_ == Btn::None ? State::Idle : State::SwallowUp;
   }
   return r;
 }
@@ -411,6 +412,24 @@ void Decision::onKeyDown(const InputEvent& e, Result& r) {
     r.emits.push_back(panelEmit(true));
     return;
   }
+  if (active() && cfg_.mappedKey && vk == cfg_.triggerVk) {
+    r.swallow = true;
+    swallowKeyUps_.insert(vk);
+    if (!repeat) {
+      if (state_ == State::Wheel && dragBtn_ == Btn::None) {
+        cancelGesture(r);
+      } else if (state_ == State::Idle) {
+        owner_ = WheelKind::Ping;
+        dragBtn_ = Btn::None;
+        state_ = State::Wheel;
+        px_ = e.x;
+        py_ = e.y;
+        mappedPressMs_ = lastMouseMs_ = e.timeMs;
+        r.emits.push_back(point(Emit::Kind::WheelOpen, px_, py_, owner_));
+      }
+    }
+    return;
+  }
   if (active()) {
     if (vk == kVkEsc && (state_ == State::Pending || state_ == State::Wheel)) {
       r.swallow = true;
@@ -454,6 +473,14 @@ void Decision::onKeyUp(const InputEvent& e, Result& r) {
   const bool triggerReleased = released(owner_);
 
   if (swallowKeyUps_.erase(vk) > 0) r.swallow = true;
+  if (r.swallow && cfg_.mappedKey && vk == cfg_.triggerVk && state_ == State::Wheel && dragBtn_ == Btn::None) {
+    // Some drivers emit a complete keystroke on button-down. Keep the wheel open for a left click in that case.
+    constexpr uint64_t kMappedTapMs = 120;
+    if (e.timeMs - mappedPressMs_ <= kMappedTapMs && std::hypot(double(e.x) - px_, double(e.y) - py_) < 4.0) return;
+    r.emits.push_back(point(Emit::Kind::WheelRelease, e.x, e.y, owner_));
+    state_ = State::Idle;
+    return;
+  }
   onTapKeyUp(vk, e.timeMs, r);
   if (vk == panelDown_) {
     panelDown_ = 0;
@@ -507,6 +534,7 @@ void Decision::onKeyUp(const InputEvent& e, Result& r) {
 
 void Decision::onMouseDown(const InputEvent& e, Result& r) {
   if (state_ == State::SwallowUp && e.btn == dragBtn_) state_ = State::Idle;  // the matching up was lost
+  if (e.btn == Btn::Left) swallowLeftUp_ = false;
   // A new right-down means the previous right-up never arrived (secure desktop, Win+L, UAC): don't swallow this one's.
   if (e.btn == Btn::Right) swallowRightUp_ = false;
   if (!active()) return;
@@ -515,6 +543,14 @@ void Decision::onMouseDown(const InputEvent& e, Result& r) {
     swallowRightUp_ = true;
     markSwallow();
     cancelGesture(r);
+    return;
+  }
+  if (state_ == State::Wheel && e.btn == Btn::Left && dragBtn_ != Btn::Left) {
+    r.swallow = true;
+    swallowLeftUp_ = true;
+    r.emits.push_back(point(Emit::Kind::WheelRelease, e.x, e.y, owner_));
+    // A physical side button still needs its matching up swallowed.
+    state_ = dragBtn_ == Btn::None ? State::Idle : State::SwallowUp;
     return;
   }
   if (state_ != State::Idle) return;
@@ -535,15 +571,21 @@ void Decision::onMouseDown(const InputEvent& e, Result& r) {
     r.swallow = true;
     markSwallow();
     heldBackVk_ = 0;  // tap-through: the held-back key started a gesture, so it is never typed
-    state_ = State::Pending;
+    state_ = isMouseTrigger(claimed) ? State::Wheel : State::Pending;
     owner_ = claimed;
     dragBtn_ = e.btn;
     px_ = e.x;
     py_ = e.y;
+    if (state_ == State::Wheel) r.emits.push_back(point(Emit::Kind::WheelOpen, px_, py_, owner_));
   }
 }
 
 void Decision::onMouseUp(const InputEvent& e, Result& r) {
+  if (e.btn == Btn::Left && swallowLeftUp_) {
+    swallowLeftUp_ = false;
+    r.swallow = true;
+    return;
+  }
   if (e.btn == Btn::Right && swallowRightUp_) {
     swallowRightUp_ = false;
     r.swallow = true;

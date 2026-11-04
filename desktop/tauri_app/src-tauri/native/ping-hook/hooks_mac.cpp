@@ -5,9 +5,9 @@
 #include <array>
 #include <chrono>
 #include <cmath>
-#include <iostream>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <string>
-#include <thread>
 
 #include "app.h"
 #include "commands.h"
@@ -157,6 +157,15 @@ CGEventRef tapCallback(CGEventTapProxy, CGEventType type, CGEventRef event, void
     e.kind = type == kCGEventKeyDown ? EvKind::KeyDown : EvKind::KeyUp;
     e.vk = vk;
     e.timeMs = t;
+    if (g_decision->config().mappedKey && vk == g_decision->config().triggerVk) {
+      auto cursor = CGEventCreate(nullptr);
+      if (cursor) {
+        const auto location = CGEventGetLocation(cursor);
+        e.x = static_cast<int>(std::lround(location.x));
+        e.y = static_cast<int>(std::lround(location.y));
+        CFRelease(cursor);
+      }
+    }
     return apply(g_decision->onEvent(e)) ? nullptr : event;
   }
 
@@ -210,9 +219,26 @@ void handleCommand(const std::string& text) {
   }
 }
 
+void readCommands(CFFileDescriptorRef descriptor, CFOptionFlags, void* context) {
+  auto& pending = *static_cast<std::string*>(context);
+  char bytes[4096];
+  const ssize_t count = recv(CFFileDescriptorGetNativeDescriptor(descriptor), bytes, sizeof(bytes), 0);
+  if (count <= 0) {
+    CFRunLoopStop(CFRunLoopGetCurrent());
+    return;
+  }
+  pending.append(bytes, static_cast<size_t>(count));
+  size_t end;
+  while ((end = pending.find('\n')) != std::string::npos) {
+    handleCommand(pending.substr(0, end));
+    pending.erase(0, end + 1);
+  }
+  CFFileDescriptorEnableCallBacks(descriptor, kCFFileDescriptorReadCallBack);
+}
+
 }  // namespace
 
-int runHooks(Output& out) {
+int runHooks(Output& out, int socket) {
   Decision decision;
   decision.setMaskMenuKeys(false);
   // The repeat watchdog only guards lost key-ups; macOS repeat delay and the repeat setting make repeats unreliable.
@@ -230,7 +256,7 @@ int runHooks(Output& out) {
       CGEventMaskBit(kCGEventScrollWheel);
   g_tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, mask, tapCallback, nullptr);
   if (g_tap == nullptr) {
-    out.error("noAccess", "Can't read input: lolPing needs Accessibility permission");
+    out.error("noAccess", "Beacon needs Accessibility permission");
     return kExitNoAccess;
   }
   CFRunLoopRef loop = CFRunLoopGetCurrent();
@@ -245,28 +271,25 @@ int runHooks(Output& out) {
       });
   CFRunLoopAddTimer(loop, timer, kCFRunLoopCommonModes);
 
-  std::thread reader([loop] {
-    std::string line;
-    while (std::getline(std::cin, line)) {
-      if (!line.empty() && line.back() == '\r') line.pop_back();
-      auto* text = new std::string(std::move(line));
-      CFRunLoopPerformBlock(loop, kCFRunLoopCommonModes, ^{
-        handleCommand(*text);
-        delete text;
-      });
-      CFRunLoopWakeUp(loop);
-    }
-    // stdin closed: Electron is gone
-    CFRunLoopPerformBlock(loop, kCFRunLoopCommonModes, ^{
-      CFRunLoopStop(loop);
-    });
-    CFRunLoopWakeUp(loop);
-  });
-  reader.detach();
-
-  resync();  // a modifier may already be held
-  out.ready();
-  CFRunLoopRun();
+  std::string pending;
+  CFFileDescriptorContext context{0, &pending, nullptr, nullptr, nullptr};
+  CFFileDescriptorRef descriptor = CFFileDescriptorCreate(kCFAllocatorDefault, socket, false, readCommands, &context);
+  CFRunLoopSourceRef commands = descriptor ? CFFileDescriptorCreateRunLoopSource(kCFAllocatorDefault, descriptor, 0) : nullptr;
+  if (commands) {
+    CFRunLoopAddSource(loop, commands, kCFRunLoopCommonModes);
+    CFFileDescriptorEnableCallBacks(descriptor, kCFFileDescriptorReadCallBack);
+    resync();
+    out.ready();
+    CFRunLoopRun();
+    CFRunLoopRemoveSource(loop, commands, kCFRunLoopCommonModes);
+    CFRelease(commands);
+  } else {
+    out.error("Could not start the Beacon input command source");
+  }
+  if (descriptor) {
+    CFFileDescriptorInvalidate(descriptor);
+    CFRelease(descriptor);
+  }
 
   CGEventTapEnable(g_tap, false);
   CFRunLoopTimerInvalidate(timer);
@@ -280,3 +303,32 @@ int runHooks(Output& out) {
 }
 
 }  // namespace lp
+
+extern "C" void beacon_ping_run(int socket) {
+  const int noSigpipe = 1;
+  setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, sizeof(noSigpipe));
+  lp::Output output([socket](const std::string& message) {
+    const std::string line = message + '\n';
+    size_t sent = 0;
+    while (sent < line.size()) {
+      const ssize_t count = send(socket, line.data() + sent, line.size() - sent, 0);
+      if (count <= 0) return false;
+      sent += static_cast<size_t>(count);
+    }
+    return true;
+  });
+  lp::runHooks(output, socket);
+  output.stop();
+  close(socket);
+}
+
+extern "C" void beacon_ping_prompt_accessibility() {
+  const void* key = kAXTrustedCheckOptionPrompt;
+  const void* value = kCFBooleanTrue;
+  auto options = CFDictionaryCreate(kCFAllocatorDefault, &key, &value, 1,
+                                    &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+  if (options) {
+    AXIsProcessTrustedWithOptions(options);
+    CFRelease(options);
+  }
+}

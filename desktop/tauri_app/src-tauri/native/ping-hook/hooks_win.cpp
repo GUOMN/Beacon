@@ -180,6 +180,13 @@ LRESULT CALLBACK keyProc(int code, WPARAM wParam, LPARAM lParam) {
     InputEvent e;
     e.kind = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) ? EvKind::KeyDown : EvKind::KeyUp;
     e.vk = k->vkCode;
+    if (g_decision->config().mappedKey && e.vk == g_decision->config().triggerVk) {
+      POINT cursor{};
+      if (GetCursorPos(&cursor)) {
+        e.x = cursor.x;
+        e.y = cursor.y;
+      }
+    }
     e.timeMs = GetTickCount64();
     e.selfInjected = (k->flags & LLKHF_INJECTED) != 0 && k->dwExtraInfo == kSelfMarker;
     if (applyInOrder(e, {e.kind == EvKind::KeyDown ? InjectKind::KeyDown : InjectKind::KeyUp, Btn::None, e.vk})) return 1;
