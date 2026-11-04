@@ -1,5 +1,5 @@
 import { HOTKEY_PRIMARY_MODS, UNSAFE_TRIGGER_VKS, type Hotkey } from "./shared/keys";
-import { MARKERS } from "./shared/pings";
+import { DEFAULT_EMOJI, emojiId, LEGACY_MARKERS, MARKERS } from "./shared/pings";
 
 export const triggers = {
   "logi-f13": "罗技侧键映射",
@@ -17,11 +17,12 @@ export type CustomMarker = {
   fx?: number;
 };
 
-export const defaultWheel = MARKERS.map(({ id }): string => id);
+export const defaultWheel = DEFAULT_EMOJI.map(emojiId);
+export const defaultCenter = emojiId("OK");
 export const defaultPreferences = {
   enabled: true, trigger: "alt" as Trigger, triggerVk: 0, toggleHotkey: defaultToggleHotkey, clickPing: false, dragThreshold: 8,
   wheelSize: 420, markerSize: 100, duration: 1.4, volume: 0.5,
-  wheel: [...defaultWheel], clickMarker: "attention", custom: [] as CustomMarker[],
+  wheel: [...defaultWheel], clickMarker: defaultCenter, custom: [] as CustomMarker[],
 };
 export type Preferences = typeof defaultPreferences;
 export type StoredPreferences = Partial<Preferences> & {
@@ -35,9 +36,7 @@ export type StoredPreferences = Partial<Preferences> & {
 const markerIcon = (art: string, color: string) => `data:image/svg+xml,${encodeURIComponent(
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><path d="M24 2 42 12v24L24 46 6 36V12Z" fill="#14243a" stroke="${color}" stroke-opacity=".65"/><g transform="translate(6 6) scale(.75)" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">${art}</g></svg>`,
 )}`;
-export const builtInMarkers = MARKERS.map(marker => ({
-  ...marker, icon: markerIcon(marker.art, marker.color),
-}));
+export const builtInMarkers = [...MARKERS, ...LEGACY_MARKERS];
 export const emptyIcon = builtInMarkers[0].icon;
 export const soundIcon = markerIcon('<path d="M20 32V15l15-4v16M20 16l15-4"/><ellipse cx="15" cy="33" rx="5" ry="4"/><ellipse cx="30" cy="28" rx="5" ry="4"/>', "#e8b6ff");
 
@@ -47,7 +46,7 @@ export function readPreferences(value: StoredPreferences): Preferences {
     item && typeof item.id === "string" && typeof item.name === "string" &&
     (typeof item.still === "string" || typeof item.sound === "string")) : [];
   const customIds = new Set(custom.map(item => item.id));
-  const valid = new Set([...defaultWheel, ...customIds]);
+  const valid = new Set([...builtInMarkers.map(item => item.id), ...customIds]);
   const used = new Set<string>();
   const assigned = defaultWheel.map((_, i) => {
     const prior = value.wheel?.[i];

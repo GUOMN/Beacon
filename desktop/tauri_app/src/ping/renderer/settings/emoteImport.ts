@@ -5,6 +5,10 @@ import {
 } from '../../shared/emotes';
 import { imageSize, isAnimatedWebp, sniffImage, type ImageType } from '../../shared/imageSniff';
 
+export const dataUrl = (bytes: Uint8Array, mime: string) =>
+  `data:${mime};base64,${btoa(Array.from({ length: Math.ceil(bytes.length / 4096) }, (_, i) =>
+    String.fromCharCode(...bytes.subarray(i * 4096, (i + 1) * 4096))).join(""))}`;
+
 export type Prepared = { ok: true; file: EmoteFile } | { ok: false; error: ImportError };
 export type PreparedSound = { ok: true; bytes: Uint8Array } | { ok: false; error: SoundError };
 

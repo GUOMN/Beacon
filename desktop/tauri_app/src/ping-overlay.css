@@ -11,7 +11,7 @@ html.ping-view, html.ping-view body, html.ping-view #root {
   translate: -50% -50%;
   animation: beacon-ping 1.4s ease-out both;
 }
-.beacon-ping-marker img { width: 100%; height: 100%; }
+.beacon-ping-marker img { width: 100%; height: 100%; object-fit: contain; }
 @keyframes beacon-ping {
   0% { scale: .65; }
   20% { scale: 1.15; }

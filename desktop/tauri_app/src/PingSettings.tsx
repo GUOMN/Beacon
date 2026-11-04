@@ -3,19 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { ShortcutCapture } from "./ping/ShortcutCapture";
 import { hotkeyLabel, vkLabel } from "./ping/shared/keys";
 import { WheelEditor } from "./ping/renderer/settings/WheelEditor";
-import { prepareEmote, prepareSound } from "./ping/renderer/settings/emoteImport";
+import { dataUrl, prepareEmote, prepareSound } from "./ping/renderer/settings/emoteImport";
 import { sniffImage } from "./ping/shared/imageSniff";
 import { sniffAudio } from "./ping/shared/audioSniff";
 import { MAX_CUSTOM_EMOTES } from "./ping/shared/emotes";
 import {
-  builtInMarkers, defaultPreferences, defaultWheel, playBuiltInSound,
+  builtInMarkers, defaultPreferences, defaultWheel, defaultCenter, playBuiltInSound,
   playMarkerSound, readPreferences, soundIcon, triggers, type CustomMarker, type Preferences,
   type StoredPreferences, type Trigger,
 } from "./ping/preferences";
-
-const dataUrl = (bytes: Uint8Array, mime: string) =>
-  `data:${mime};base64,${btoa(Array.from({ length: Math.ceil(bytes.length / 4096) }, (_, i) =>
-    String.fromCharCode(...bytes.subarray(i * 4096, (i + 1) * 4096))).join(""))}`;
 
 // getRandomValues is also available in WebViews that do not expose randomUUID.
 const newMarkerId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)),
@@ -143,7 +139,10 @@ export default function PingSettings() {
       onChange={e => setPrefs({ ...prefs, [key]: e.target.valueAsNumber })}/></label>;
 
   const pool = [
-    ...builtInMarkers,
+    ...builtInMarkers.map(item => ({
+      ...item,
+      hidden: !item.id.startsWith("feishu:") && !prefs.wheel.includes(item.id) && prefs.clickMarker !== item.id,
+    })),
     ...prefs.custom.map(item => ({ id: item.id, name: item.name, icon: item.still ?? soundIcon, onRemove: () => remove(item.id) })),
   ];
   const status = input.status === "noAccess" ? "缺少 macOS 辅助功能权限" :
@@ -164,7 +163,7 @@ export default function PingSettings() {
         <button className="primary" disabled={busy} onClick={() => void save()}>保存轮盘配置</button></div>
     </section>
     <WheelEditor wheel={prefs.wheel} center={prefs.clickMarker} centerOn={prefs.clickPing} trigger={triggerLabel}
-      pool={pool} defaults={{ wheel: defaultWheel, center: "attention" }}
+      pool={pool} defaults={{ wheel: defaultWheel, center: defaultCenter }}
       labels={{ title: "标记轮盘", desc: "拖动素材到槽位，或先选素材再点击槽位", poolTitle: "素材库", poolDesc: "内置标记、自定义图片和音效共用这一个轮盘" }}
       onDropFiles={files => { if (!busy) void importImages(files); }}
       fxIds={prefs.custom.filter(item => item.still).map(item => item.id)}

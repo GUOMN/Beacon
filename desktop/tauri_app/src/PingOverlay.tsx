@@ -4,7 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { Wheel } from "./ping/renderer/overlay/wheel";
 import { emoteFxContent } from "./ping/renderer/shared/emoteFx";
 import { EMOTE_DURATION_S } from "./ping/shared/emotes";
-import { imageSize } from "./ping/shared/imageSniff";
+import { dataUrl, prepareEmote } from "./ping/renderer/settings/emoteImport";
+import { imageSize, sniffImage } from "./ping/shared/imageSniff";
 import { builtInMarkers, defaultPreferences, emptyIcon, playBuiltInSound, playMarkerSound, readPreferences, soundIcon, type StoredPreferences } from "./ping/preferences";
 import "./ping/renderer/shared/emoteFx.css";
 import "./ping-overlay.css";
@@ -25,6 +26,27 @@ function sharedImage(url: string | undefined): string | undefined {
   } catch {
     return;
   }
+}
+
+const preparedIcons = new Map<string, Promise<string>>();
+
+function prepareSharedIcon(url: string): Promise<string> {
+  const cached = preparedIcons.get(url);
+  if (cached) return cached;
+  const prepared = (async () => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("无法读取轮盘图片");
+    const file = new File([await response.blob()], "marker.png");
+    const result = await prepareEmote(file);
+    if (!result.ok) throw new Error(`无法准备轮盘图片（${result.error}）`);
+    const { still } = result.file;
+    return dataUrl(still, `image/${sniffImage(still)}`);
+  })().catch(error => {
+    preparedIcons.delete(url);
+    throw error;
+  });
+  preparedIcons.set(url, prepared);
+  return prepared;
 }
 
 export default function PingOverlay() {
@@ -90,23 +112,20 @@ export default function PingOverlay() {
       timers.add(timer);
     };
 
-    const place = (key: string, point: Point) => {
+    const place = async (key: string, point: Point) => {
       const builtIn = builtInMarkers.find(item => item.id === key);
       const custom = prefs.custom.find(item => item.id === key);
       if (!builtIn && !custom) return;
-      let marker: Marker;
-      if (custom?.still) {
-        marker = { ...point, kind: "emote", image: custom.still, fx: custom.fx ?? 0 };
-        render(marker, custom.animation ?? custom.still);
-      } else {
-        marker = { ...point, kind: builtIn?.id ?? "attention" };
-        render(marker);
-      }
+      const icon = builtIn?.icon ?? builtInMarkers.find(item => item.id === "attention")?.icon ?? emptyIcon;
+      const marker = { ...point, kind: "emote", fx: custom?.fx ?? 0 };
+      render(marker, custom?.animation ?? custom?.still ?? icon);
       if (builtIn) playBuiltInSound(builtIn.frequency, prefs.volume);
       if (custom?.sound) playMarkerSound(custom.sound, prefs.volume);
-      void invoke("bridge_action", {
-        action: "send-ping", payload: { ...marker, time: Date.now() / 1000 },
-      }).catch(console.error);
+      const image = custom?.still ?? await prepareSharedIcon(icon);
+      if (disposed) return;
+      await invoke("bridge_action", {
+        action: "send-ping", payload: { ...marker, image, time: Date.now() / 1000 },
+      });
     };
 
     const subscription = listen<OverlayEvent>("beacon-ping-overlay", ({ payload }) => {
@@ -129,11 +148,11 @@ export default function PingOverlay() {
           wheel.move(x, y);
         } else if (payload.type === "wheelRelease") {
           const choice = wheel.release(x, y);
-          if (choice) place(choice.key, {
+          if (choice) void place(choice.key, {
             x: choice.x / window.innerWidth, y: choice.y / window.innerHeight,
-          });
+          }).catch(console.error);
         } else {
-          place(prefs.clickMarker, { x: payload.x, y: payload.y });
+          void place(prefs.clickMarker, { x: payload.x, y: payload.y }).catch(console.error);
         }
       }
     });

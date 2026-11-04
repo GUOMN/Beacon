@@ -154,3 +154,5 @@
   .ping-status { grid-template-columns: 1fr; }
   .ping-save { grid-column: 1; grid-row: auto; }
 }
+
+.weSearch { width: 100%; box-sizing: border-box; margin-top: 10px; }

@@ -39,6 +39,7 @@ export interface PoolItem<T extends string> {
   name: string;
   badge?: string;
   hidden?: boolean;
+  searchKey?: string;
   onRemove?: () => void;
   tool?: { label: string; icon: ReactElement; on: boolean; onClick: () => void };
 }
@@ -76,6 +77,10 @@ export function WheelEditor<T extends string>({
   wheel, center, centerOn, trigger, pool, defaults, labels, poolExtra, onDropFiles, onFxPick, fxIds, fxFor, onChange, onPreview,
 }: Props<T>) {
   const t = text;
+  const [query, setQuery] = useState("");
+  const search = query.trim().toLowerCase();
+  const visibleItems = pool.filter(item => !item.hidden &&
+    (item.name.toLowerCase().includes(search) || item.searchKey?.toLowerCase().includes(search)));
   const [picked, setPicked] = useState<WheelSource<T> | null>(null);
   const [hot, setHot] = useState<WheelTarget | null>(null);
   const [filesOver, setFilesOver] = useState(false);
@@ -216,8 +221,11 @@ export function WheelEditor<T extends string>({
         <div className={`wePool${filesOver ? ' filesOver' : ''}`} {...fileDropProps}>
           <div className="wePoolTitle">{labels.poolTitle}</div>
           <span className="desc">{labels.poolDesc}</span>
+          <input className="weSearch" type="search" aria-label="搜索素材" placeholder="搜索名称或表情代码"
+            value={query} onChange={event => setQuery(event.target.value)} />
           <div className="weTiles">
-            {pool.filter((item) => !item.hidden).map((p) => {
+            {visibleItems.length === 0 && <span className="desc">没有匹配的素材</span>}
+            {visibleItems.map((p) => {
               const slot = wheel.indexOf(p.id);
               const pick = () => {
                 onPreview(p.id);
@@ -231,7 +239,7 @@ export function WheelEditor<T extends string>({
                     onContextMenu={(e) => openFx(p.id, e)}>
                     {p.badge ? <span className="weNew">{p.badge}</span> : null}
                     {slot >= 0 ? <span className="weWhere">{t.slotNames[slot]}</span> : null}
-                    <img src={p.icon} alt="" />
+                    <img src={p.icon} alt="" loading="lazy" />
                     {p.name}
                   </div>
                   {p.tool ? (

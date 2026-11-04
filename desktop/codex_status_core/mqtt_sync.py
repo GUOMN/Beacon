@@ -50,6 +50,7 @@ def validate_mqtt_settings(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 PING_KINDS = ("attention", "idea", "question", "wait", "help", "review", "done", "thanks")
+FEISHU_EMOJI_KIND = re.compile(r"feishu:[A-Za-z0-9_]{1,64}")
 EMOTE_IMAGE = re.compile(r"data:image/(?:webp|png);base64,[A-Za-z0-9+/]+={0,2}")
 MAX_EMOTE_URL = 16_420
 PING_TTL = 5
@@ -57,7 +58,7 @@ PING_TTL = 5
 
 def marker_data(value):
     kind = value.get("kind")
-    if kind in PING_KINDS:
+    if isinstance(kind, str) and (kind in PING_KINDS or FEISHU_EMOJI_KIND.fullmatch(kind)):
         return {"kind": kind}
     if kind == "emote":
         image, fx = value.get("image"), value.get("fx", 0)
@@ -106,7 +107,7 @@ class MqttPublisher:
 
     def send_ping(self, value):
         marker = marker_data(value)
-        if marker is None or not ping_coordinates(value):
+        if marker is None or marker["kind"] != "emote" or not ping_coordinates(value):
             raise ValueError("Ping 数据无效")
         now = time.time()
         created = value.get("time", now)
